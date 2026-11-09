@@ -10,14 +10,14 @@
 use std::sync::atomic::Ordering;
 
 use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use waypost_core::geo::Point;
-use waypost_core::lookup::{self, Address};
+use waypost_core::lookup::{self, Address, Index};
 
-use crate::{St, error, lang, not_ready, radius, street_rule};
+use crate::{AppState, St, bad, index, lang, point, query, radius, street_rule, timed};
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -150,45 +150,31 @@ fn display_name(d: &Details<'_>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// Parses the shared parameters. `Err` is a ready 400 response.
-#[allow(clippy::result_large_err)] // A Response is the natural error here.
+/// Parses the shared parameters. `Err` is a ready 400 or 503 response.
 fn parse(
-    st: &crate::AppState,
-    idx: &lookup::Index,
-    p: &Params,
-) -> Result<(Point, f64, Option<u32>, lookup::StreetRule), Response> {
-    let bad = |m: String| {
-        st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
-        error(StatusCode::BAD_REQUEST, m)
+    st: &AppState,
+    q: Result<Query<Params>, QueryRejection>,
+) -> Result<(&Index, lookup::Query), Response> {
+    let p = query(st, q)?;
+    let idx = index(st)?;
+    let bad = |e: String| bad(st, e);
+    let q = lookup::Query {
+        pt: point(p.lat, p.lon).map_err(bad)?,
+        radius_m: radius(p.distance).map_err(bad)?,
+        lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
+        admin_only: false,
+        street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
     };
-    let (Some(lat), Some(lon)) = (p.lat, p.lon) else {
-        return Err(bad("lat and lon are required".into()));
-    };
-    let pt = Point::from_deg(lat, lon)
-        .ok_or_else(|| bad("lat must be in [-90, 90] and lon in [-180, 180]".into()))?;
-    let r = radius(p.distance).map_err(|e| bad(e.into()))?;
-    let l = lang(idx, p.lang.as_deref()).map_err(bad)?;
-    let rule = street_rule(p.street.as_deref()).map_err(bad)?;
-    Ok((pt, r, l, rule))
+    Ok((idx, q))
 }
 
-pub async fn reverse(State(st): St, Query(p): Query<Params>) -> Response {
+pub async fn reverse(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Response {
     st.metrics.reverse.fetch_add(1, Ordering::Relaxed);
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    let (pt, radius_m, lang, street_rule) = match parse(&st, idx, &p) {
+    let (idx, q) = match parse(&st, q) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let q = lookup::Query {
-        pt,
-        radius_m,
-        lang,
-        admin_only: false,
-        street_rule,
-    };
-    let ans = crate::timed(&st.metrics, idx, &q);
+    let ans = timed(&st.metrics, || idx.lookup(&q));
     let address = details(&ans.address);
     Json(Reverse {
         display_name: display_name(&address),
@@ -197,16 +183,13 @@ pub async fn reverse(State(st): St, Query(p): Query<Params>) -> Response {
     .into_response()
 }
 
-pub async fn snap(State(st): St, Query(p): Query<Params>) -> Response {
+pub async fn snap(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Response {
     st.metrics.snap.fetch_add(1, Ordering::Relaxed);
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    let (pt, radius_m, lang, _) = match parse(&st, idx, &p) {
+    let (idx, q) = match parse(&st, q) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match idx.snap(pt, radius_m, lang, true) {
+    match timed(&st.metrics, || idx.snap(q.pt, q.radius_m, q.lang, true)) {
         Some(s) => Json(Snap {
             lat: s.lat,
             lon: s.lon,

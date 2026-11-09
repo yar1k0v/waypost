@@ -1,12 +1,16 @@
 //! waypost-server: HTTP API over a memory-mapped waypost index.
 
+// Handlers return a ready 4xx/5xx `Response` as their error.
+#![allow(clippy::result_large_err)]
+
 mod compat;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use axum::extract::{Query, State, rejection::JsonRejection};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,7 +19,7 @@ use clap::Parser;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use waypost_core::geo::Point;
-use waypost_core::lookup::{self, Answer, Index, MAX_RADIUS_M};
+use waypost_core::lookup::{self, Answer, Index, MAX_RADIUS_M, Snapped};
 
 /// Most points one batch request may carry.
 pub const MAX_BATCH: usize = 10_000;
@@ -68,50 +72,6 @@ pub struct AppState {
 
 type St = State<Arc<AppState>>;
 
-#[derive(Deserialize)]
-pub struct ReverseParams {
-    lat: Option<f64>,
-    lon: Option<f64>,
-    radius: Option<f64>,
-    lang: Option<String>,
-    #[serde(default)]
-    admin_only: bool,
-    street: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct BatchPoint {
-    lat: f64,
-    lon: f64,
-    #[serde(default)]
-    id: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-pub struct BatchRequest {
-    points: Vec<BatchPoint>,
-    radius: Option<f64>,
-    lang: Option<String>,
-    #[serde(default)]
-    admin_only: bool,
-    street: Option<String>,
-}
-
-#[derive(Serialize)]
-struct BatchItem<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a serde_json::Value>,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    answer: Option<Answer<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'static str>,
-}
-
-#[derive(Serialize)]
-struct BatchResponse<'a> {
-    results: Vec<BatchItem<'a>>,
-}
-
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }
@@ -120,11 +80,42 @@ fn not_ready() -> Response {
     error(StatusCode::SERVICE_UNAVAILABLE, "index is loading")
 }
 
-fn radius(r: Option<f64>) -> Result<f64, &'static str> {
+/// Counts a rejected request and answers 400 with a JSON error body.
+fn bad(st: &AppState, msg: impl Into<String>) -> Response {
+    st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
+    error(StatusCode::BAD_REQUEST, msg)
+}
+
+/// The query parameters, or a JSON 400 when the query string does not parse.
+fn query<P>(st: &AppState, q: Result<Query<P>, QueryRejection>) -> Result<P, Response> {
+    q.map(|Query(p)| p).map_err(|e| bad(st, e.body_text()))
+}
+
+/// The JSON body, or a JSON 400 when it does not parse.
+fn body<B>(st: &AppState, b: Result<Json<B>, JsonRejection>) -> Result<B, Response> {
+    b.map(|Json(b)| b).map_err(|e| bad(st, e.body_text()))
+}
+
+/// The loaded index, or 503 while it loads.
+fn index(st: &AppState) -> Result<&Index, Response> {
+    st.index.get().ok_or_else(not_ready)
+}
+
+pub const BAD_COORDS: &str = "lat must be in [-90, 90] and lon in [-180, 180]";
+const NO_ROAD: &str = "no road within radius";
+
+fn point(lat: Option<f64>, lon: Option<f64>) -> Result<Point, String> {
+    let (Some(lat), Some(lon)) = (lat, lon) else {
+        return Err("lat and lon are required".into());
+    };
+    Point::from_deg(lat, lon).ok_or_else(|| BAD_COORDS.into())
+}
+
+fn radius(r: Option<f64>) -> Result<f64, String> {
     match r {
         None => Ok(lookup::DEFAULT_RADIUS_M),
         Some(r) if r.is_finite() && r > 0.0 && r <= MAX_RADIUS_M => Ok(r),
-        Some(_) => Err("radius must be in (0, 1000] metres"),
+        Some(_) => Err("radius must be in (0, 1000] metres".into()),
     }
 }
 
@@ -148,124 +139,39 @@ fn street_rule(v: Option<&str>) -> Result<lookup::StreetRule, String> {
     }
 }
 
-fn timed<'a>(m: &Metrics, idx: &'a Index, q: &lookup::Query) -> Answer<'a> {
-    let t = Instant::now();
-    let a = idx.lookup(q);
-    m.observe(t.elapsed().as_micros() as u64);
-    a
-}
-
-async fn reverse(State(st): St, Query(p): Query<ReverseParams>) -> Response {
-    st.metrics.reverse.fetch_add(1, Ordering::Relaxed);
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    let bad = |m: String| {
-        st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
-        error(StatusCode::BAD_REQUEST, m)
-    };
-    let (Some(lat), Some(lon)) = (p.lat, p.lon) else {
-        return bad("lat and lon are required".into());
-    };
-    let Some(pt) = Point::from_deg(lat, lon) else {
-        return bad("lat must be in [-90, 90] and lon in [-180, 180]".into());
-    };
-    let radius_m = match radius(p.radius) {
-        Ok(r) => r,
-        Err(e) => return bad(e.into()),
-    };
-    let lang = match lang(idx, p.lang.as_deref()) {
-        Ok(l) => l,
-        Err(e) => return bad(e),
-    };
-    let rule = match street_rule(p.street.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return bad(e),
-    };
-    let q = lookup::Query {
-        pt,
-        radius_m,
-        lang,
-        admin_only: p.admin_only,
-        street_rule: rule,
-    };
-    Json(timed(&st.metrics, idx, &q)).into_response()
-}
-
-async fn batch(State(st): St, body: Result<Json<BatchRequest>, JsonRejection>) -> Response {
-    st.metrics.batch.fetch_add(1, Ordering::Relaxed);
-    let bad = |m: String| {
-        st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
-        error(StatusCode::BAD_REQUEST, m)
-    };
-    let req = match body {
-        Ok(Json(r)) => r,
-        Err(e) => return bad(e.body_text()),
-    };
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    if req.points.len() > MAX_BATCH {
-        return bad(format!("at most {MAX_BATCH} points per batch"));
+/// `roads=vehicle` (default) skips pedestrian ways; `roads=all` keeps them.
+fn vehicle_only(v: Option<&str>) -> Result<bool, String> {
+    match v {
+        None | Some("vehicle") => Ok(true),
+        Some("all") => Ok(false),
+        Some(o) => Err(format!("roads must be vehicle or all, not {o}")),
     }
-    let radius_m = match radius(req.radius) {
-        Ok(r) => r,
-        Err(e) => return bad(e.into()),
-    };
-    let lang = match lang(idx, req.lang.as_deref()) {
-        Ok(l) => l,
-        Err(e) => return bad(e),
-    };
-    let rule = match street_rule(req.street.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return bad(e),
-    };
-    st.metrics
-        .batch_points
-        .fetch_add(req.points.len() as u64, Ordering::Relaxed);
-    let st2 = st.clone();
-    let run = move || -> Response {
-        let idx = st2.index.get().expect("checked above");
-        let one = |p: &BatchPoint| -> (Option<Answer<'_>>, Option<&'static str>) {
-            match Point::from_deg(p.lat, p.lon) {
-                Some(pt) => {
-                    let q = lookup::Query {
-                        pt,
-                        radius_m,
-                        lang,
-                        admin_only: req.admin_only,
-                        street_rule: rule,
-                    };
-                    (Some(timed(&st2.metrics, idx, &q)), None)
-                }
-                None => (
-                    None,
-                    Some("lat must be in [-90, 90] and lon in [-180, 180]"),
-                ),
-            }
-        };
-        let answers: Vec<_> = if req.points.len() >= PARALLEL_FROM {
-            req.points.par_iter().map(one).collect()
-        } else {
-            req.points.iter().map(one).collect()
-        };
-        let results = req
-            .points
-            .iter()
-            .zip(answers)
-            .map(|(p, (answer, error))| BatchItem {
-                id: p.id.as_ref(),
-                answer,
-                error,
-            })
-            .collect();
-        Json(BatchResponse { results }).into_response()
-    };
-    // Batches run on the blocking pool, so a 10k batch never stalls the
-    // async workers that serve single lookups.
-    tokio::task::spawn_blocking(run)
-        .await
-        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "batch failed"))
+}
+
+fn batch_size(n: usize) -> Result<(), String> {
+    if n > MAX_BATCH {
+        return Err(format!("at most {MAX_BATCH} points per batch"));
+    }
+    Ok(())
+}
+
+/// Runs one lookup or snap and records its latency.
+fn timed<T>(m: &Metrics, f: impl FnOnce() -> T) -> T {
+    let t = Instant::now();
+    let r = f();
+    m.observe(t.elapsed().as_micros() as u64);
+    r
+}
+
+#[derive(Deserialize)]
+pub struct ReverseParams {
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+    lang: Option<String>,
+    #[serde(default)]
+    admin_only: bool,
+    street: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -277,13 +183,22 @@ pub struct SnapParams {
     roads: Option<String>,
 }
 
-/// `roads=vehicle` (default) skips pedestrian ways; `roads=all` keeps them.
-fn vehicle_only(v: Option<&str>) -> Result<bool, String> {
-    match v {
-        None | Some("vehicle") => Ok(true),
-        Some("all") => Ok(false),
-        Some(o) => Err(format!("roads must be vehicle or all, not {o}")),
-    }
+#[derive(Deserialize)]
+pub struct BatchPoint {
+    lat: f64,
+    lon: f64,
+    #[serde(default)]
+    id: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchRequest {
+    points: Vec<BatchPoint>,
+    radius: Option<f64>,
+    lang: Option<String>,
+    #[serde(default)]
+    admin_only: bool,
+    street: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -294,126 +209,170 @@ pub struct SnapBatchRequest {
     roads: Option<String>,
 }
 
+/// One kind of per-point work in a batch.
+trait BatchOp: Send + Sync + 'static {
+    type Out<'a>: Serialize + Send;
+    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Self::Out<'a>, &'static str>;
+}
+
+/// A reverse lookup; `pt` is replaced per point.
+struct ReverseOp(lookup::Query);
+
+impl BatchOp for ReverseOp {
+    type Out<'a> = Answer<'a>;
+    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Answer<'a>, &'static str> {
+        Ok(idx.lookup(&lookup::Query { pt, ..self.0 }))
+    }
+}
+
+struct SnapOp {
+    radius_m: f64,
+    lang: Option<u32>,
+    vehicle: bool,
+}
+
+impl BatchOp for SnapOp {
+    type Out<'a> = Snapped<'a>;
+    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Snapped<'a>, &'static str> {
+        idx.snap(pt, self.radius_m, self.lang, self.vehicle)
+            .ok_or(NO_ROAD)
+    }
+}
+
 #[derive(Serialize)]
-struct SnapItem<'a> {
+struct BatchItem<'a, T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<&'a serde_json::Value>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    snap: Option<lookup::Snapped<'a>>,
+    out: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'static str>,
 }
 
-const NO_ROAD: &str = "no road within radius";
-const BAD_COORDS: &str = "lat must be in [-90, 90] and lon in [-180, 180]";
-
-async fn snap(State(st): St, Query(p): Query<SnapParams>) -> Response {
-    st.metrics.snap.fetch_add(1, Ordering::Relaxed);
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    let bad = |m: String| {
-        st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
-        error(StatusCode::BAD_REQUEST, m)
-    };
-    let (Some(lat), Some(lon)) = (p.lat, p.lon) else {
-        return bad("lat and lon are required".into());
-    };
-    let Some(pt) = Point::from_deg(lat, lon) else {
-        return bad(BAD_COORDS.into());
-    };
-    let radius_m = match radius(p.radius) {
-        Ok(r) => r,
-        Err(e) => return bad(e.into()),
-    };
-    let lang = match lang(idx, p.lang.as_deref()) {
-        Ok(l) => l,
-        Err(e) => return bad(e),
-    };
-    let vehicle = match vehicle_only(p.roads.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return bad(e),
-    };
-    let t = Instant::now();
-    let r = idx.snap(pt, radius_m, lang, vehicle);
-    st.metrics.observe(t.elapsed().as_micros() as u64);
-    match r {
-        Some(s) => Json(s).into_response(),
-        None => error(StatusCode::NOT_FOUND, NO_ROAD),
-    }
+#[derive(Serialize)]
+struct BatchResponse<T> {
+    results: Vec<T>,
 }
 
-async fn snap_batch(
-    State(st): St,
-    body: Result<Json<SnapBatchRequest>, JsonRejection>,
-) -> Response {
-    st.metrics.snap_batch.fetch_add(1, Ordering::Relaxed);
-    let bad = |m: String| {
-        st.metrics.bad_requests.fetch_add(1, Ordering::Relaxed);
-        error(StatusCode::BAD_REQUEST, m)
-    };
-    let req = match body {
-        Ok(Json(r)) => r,
-        Err(e) => return bad(e.body_text()),
-    };
-    let Some(idx) = st.index.get() else {
-        return not_ready();
-    };
-    if req.points.len() > MAX_BATCH {
-        return bad(format!("at most {MAX_BATCH} points per batch"));
-    }
-    let radius_m = match radius(req.radius) {
-        Ok(r) => r,
-        Err(e) => return bad(e.into()),
-    };
-    let lang = match lang(idx, req.lang.as_deref()) {
-        Ok(l) => l,
-        Err(e) => return bad(e),
-    };
-    let vehicle = match vehicle_only(req.roads.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return bad(e),
-    };
+/// Runs a batch on the blocking pool, so a 10k batch never stalls the async
+/// workers that serve single lookups. Large batches run in parallel.
+async fn run_batch<O: BatchOp>(st: Arc<AppState>, points: Vec<BatchPoint>, op: O) -> Response {
     st.metrics
         .batch_points
-        .fetch_add(req.points.len() as u64, Ordering::Relaxed);
-    let st2 = st.clone();
+        .fetch_add(points.len() as u64, Ordering::Relaxed);
     let run = move || -> Response {
-        let idx = st2.index.get().expect("checked above");
-        let one = |p: &BatchPoint| -> (Option<lookup::Snapped<'_>>, Option<&'static str>) {
-            match Point::from_deg(p.lat, p.lon) {
-                Some(pt) => {
-                    let t = Instant::now();
-                    let r = idx.snap(pt, radius_m, lang, vehicle);
-                    st2.metrics.observe(t.elapsed().as_micros() as u64);
-                    match r {
-                        Some(s) => (Some(s), None),
-                        None => (None, Some(NO_ROAD)),
-                    }
-                }
-                None => (None, Some(BAD_COORDS)),
-            }
+        let Some(idx) = st.index.get() else {
+            return not_ready();
         };
-        let answers: Vec<_> = if req.points.len() >= PARALLEL_FROM {
-            req.points.par_iter().map(one).collect()
+        let one = |p: &BatchPoint| match Point::from_deg(p.lat, p.lon) {
+            Some(pt) => timed(&st.metrics, || op.run(idx, pt)),
+            None => Err(BAD_COORDS),
+        };
+        let outs: Vec<_> = if points.len() >= PARALLEL_FROM {
+            points.par_iter().map(one).collect()
         } else {
-            req.points.iter().map(one).collect()
+            points.iter().map(one).collect()
         };
-        let results: Vec<SnapItem> = req
-            .points
+        let results = points
             .iter()
-            .zip(answers)
-            .map(|(p, (snap, error))| SnapItem {
-                id: p.id.as_ref(),
-                snap,
-                error,
+            .zip(outs)
+            .map(|(p, r)| {
+                let (out, error) = match r {
+                    Ok(o) => (Some(o), None),
+                    Err(e) => (None, Some(e)),
+                };
+                BatchItem {
+                    id: p.id.as_ref(),
+                    out,
+                    error,
+                }
             })
             .collect();
-        Json(serde_json::json!({ "results": results })).into_response()
+        Json(BatchResponse { results }).into_response()
     };
     tokio::task::spawn_blocking(run)
         .await
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "batch failed"))
+}
+
+async fn reverse(State(st): St, q: Result<Query<ReverseParams>, QueryRejection>) -> Response {
+    st.metrics.reverse.fetch_add(1, Ordering::Relaxed);
+    let run = || -> Result<Response, Response> {
+        let p = query(&st, q)?;
+        let idx = index(&st)?;
+        let bad = |e: String| bad(&st, e);
+        let q = lookup::Query {
+            pt: point(p.lat, p.lon).map_err(bad)?,
+            radius_m: radius(p.radius).map_err(bad)?,
+            lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
+            admin_only: p.admin_only,
+            street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
+        };
+        Ok(Json(timed(&st.metrics, || idx.lookup(&q))).into_response())
+    };
+    run().unwrap_or_else(|e| e)
+}
+
+async fn batch(State(st): St, b: Result<Json<BatchRequest>, JsonRejection>) -> Response {
+    st.metrics.batch.fetch_add(1, Ordering::Relaxed);
+    let parse = || -> Result<(Vec<BatchPoint>, ReverseOp), Response> {
+        let req = body(&st, b)?;
+        let idx = index(&st)?;
+        let bad = |e: String| bad(&st, e);
+        batch_size(req.points.len()).map_err(bad)?;
+        let q = lookup::Query {
+            pt: Point { lat: 0, lon: 0 },
+            radius_m: radius(req.radius).map_err(bad)?,
+            lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
+            admin_only: req.admin_only,
+            street_rule: street_rule(req.street.as_deref()).map_err(bad)?,
+        };
+        Ok((req.points, ReverseOp(q)))
+    };
+    match parse() {
+        Ok((points, op)) => run_batch(st, points, op).await,
+        Err(r) => r,
+    }
+}
+
+async fn snap(State(st): St, q: Result<Query<SnapParams>, QueryRejection>) -> Response {
+    st.metrics.snap.fetch_add(1, Ordering::Relaxed);
+    let run = || -> Result<Response, Response> {
+        let p = query(&st, q)?;
+        let idx = index(&st)?;
+        let bad = |e: String| bad(&st, e);
+        let pt = point(p.lat, p.lon).map_err(bad)?;
+        let op = SnapOp {
+            radius_m: radius(p.radius).map_err(bad)?,
+            lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
+            vehicle: vehicle_only(p.roads.as_deref()).map_err(bad)?,
+        };
+        Ok(match timed(&st.metrics, || op.run(idx, pt)) {
+            Ok(s) => Json(s).into_response(),
+            Err(e) => error(StatusCode::NOT_FOUND, e),
+        })
+    };
+    run().unwrap_or_else(|e| e)
+}
+
+async fn snap_batch(State(st): St, b: Result<Json<SnapBatchRequest>, JsonRejection>) -> Response {
+    st.metrics.snap_batch.fetch_add(1, Ordering::Relaxed);
+    let parse = || -> Result<(Vec<BatchPoint>, SnapOp), Response> {
+        let req = body(&st, b)?;
+        let idx = index(&st)?;
+        let bad = |e: String| bad(&st, e);
+        batch_size(req.points.len()).map_err(bad)?;
+        let op = SnapOp {
+            radius_m: radius(req.radius).map_err(bad)?,
+            lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
+            vehicle: vehicle_only(req.roads.as_deref()).map_err(bad)?,
+        };
+        Ok((req.points, op))
+    };
+    match parse() {
+        Ok((points, op)) => run_batch(st, points, op).await,
+        Err(r) => r,
+    }
 }
 
 async fn healthz() -> &'static str {
@@ -567,11 +526,34 @@ async fn main() {
         });
     eprintln!("listening on {}", args.listen);
     axum::serve(listener, app(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server failed");
+}
+
+/// Resolves on Ctrl+C or SIGTERM. The server runs as PID 1 in its container,
+/// where SIGTERM (`docker stop`, a Kubernetes rollout) is ignored unless handled.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+    eprintln!("shutting down");
 }
 
 #[cfg(test)]
@@ -605,6 +587,28 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(status(empty(), get("/metrics")).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bad_query_string_is_json_400() {
+        for u in [
+            "/v1/reverse?lat=abc&lon=1",
+            "/v1/snap?lat=1&lon=1&radius=x",
+            "/reverse?lat=1&lon=1&distance=x",
+            "/v1/reverse?lat=1&lon=1&admin_only=maybe",
+        ] {
+            let res = empty()
+                .oneshot(Request::get(u).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{u}");
+            let b = http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+            assert!(v["error"].is_string(), "{u}: {v}");
+        }
     }
 
     #[tokio::test]
