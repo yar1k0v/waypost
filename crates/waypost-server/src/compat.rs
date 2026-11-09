@@ -189,7 +189,9 @@ pub async fn snap(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Re
         Ok(v) => v,
         Err(r) => return r,
     };
-    match timed(&st.metrics, || idx.snap(q.pt, q.radius_m, q.lang, true)) {
+    match timed(&st.metrics, || {
+        idx.snap(q.pt, q.radius_m, q.lang, true, None)
+    }) {
         Some(s) => Json(Snap {
             lat: s.lat,
             lon: s.lon,

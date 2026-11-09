@@ -53,18 +53,31 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 | `radius` | no | 100 | Metres, max 1000 |
 | `lang` | no | | Road name language |
 | `roads` | no | `vehicle` | `vehicle` skips pedestrian ways; `all` keeps them |
+| `bearing` | no | | Vehicle heading, degrees clockwise from north, [0, 360). Only road segments running that way count |
+| `bearing_tol` | no | 45 | Largest accepted difference to a segment's direction, degrees, (0, 180] |
+
+```sh
+curl 'http://127.0.0.1:8088/v1/snap?lat=46.94797&lon=7.44742'
+```
 
 ```json
-{"lat":46.9479729,"lon":7.4474197,"distance_m":3.4,
+{"lat":46.9479724,"lon":7.4474183,"distance_m":0.3,"bearing_deg":64,
  "road":{"name":"Marktgasse","class":"residential","maxspeed_kmh":30,"osm_way_id":691907770},
  "source":{"osm_type":"way","osm_id":691907770,"data_date":"2026-11-08T21:21:00Z"}}
 ```
 
-404 `{"error":"no road within radius"}` when no road is that close.
+With `bearing=0` the same point snaps to Theaterplatz, 4.2 m away, `bearing_deg` 5.
+
+| Field | Meaning |
+|---|---|
+| `bearing_deg` | Road direction at the snapped point. With `bearing`: the direction of travel. Without: the way's own direction |
+
+- A road matches in both directions: one-way roads are not in the index.
+- 404 `{"error":"no road within radius"}` when no road is that close, or none runs within `bearing_tol` of `bearing`.
 
 ## POST /v1/snap/batch
 
-Same body as the reverse batch, with `roads` instead of `street` and `admin_only`. A point with no road gets `"error"`.
+Same body as the reverse batch, with `roads` and `bearing_tol` instead of `street` and `admin_only`. Each point may carry its own `bearing`. A point with no road, or with a bad `bearing`, gets `"error"`.
 
 ## Legacy-compatible routes
 

@@ -82,7 +82,7 @@ Details: [docs/architecture.md](docs/architecture.md).
 |---|---|
 | `GET /v1/reverse` | Address of one point |
 | `POST /v1/reverse/batch` | Addresses of up to 10,000 points, in input order |
-| `GET /v1/snap` | Nearest road point, with road name, class and maxspeed |
+| `GET /v1/snap` | Nearest road point, with road name, class and maxspeed. An optional `bearing` picks the road the vehicle drives along |
 | `POST /v1/snap/batch` | Up to 10,000 snapped points |
 | `GET /reverse`, `GET /snap` | Legacy-compatible routes for existing clients |
 | `GET /v1/info` | Index sources, OSM data date, languages |

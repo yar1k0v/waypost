@@ -19,7 +19,9 @@ use clap::Parser;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use waypost_core::geo::Point;
-use waypost_core::lookup::{self, Answer, Index, MAX_RADIUS_M, Snapped};
+use waypost_core::lookup::{
+    self, Answer, DEFAULT_BEARING_TOL_DEG, Heading, Index, MAX_RADIUS_M, Snapped,
+};
 
 /// Most points one batch request may carry.
 pub const MAX_BATCH: usize = 10_000;
@@ -102,6 +104,7 @@ fn index(st: &AppState) -> Result<&Index, Response> {
 }
 
 pub const BAD_COORDS: &str = "lat must be in [-90, 90] and lon in [-180, 180]";
+const BAD_BEARING: &str = "bearing must be in [0, 360)";
 const NO_ROAD: &str = "no road within radius";
 
 fn point(lat: Option<f64>, lon: Option<f64>) -> Result<Point, String> {
@@ -148,6 +151,25 @@ fn vehicle_only(v: Option<&str>) -> Result<bool, String> {
     }
 }
 
+fn bearing_tol(t: Option<f64>) -> Result<f64, String> {
+    match t {
+        None => Ok(DEFAULT_BEARING_TOL_DEG),
+        Some(t) if t > 0.0 && t <= 180.0 => Ok(t),
+        Some(_) => Err("bearing_tol must be in (0, 180] degrees".into()),
+    }
+}
+
+fn heading(bearing: Option<f64>, tol_deg: f64) -> Result<Option<Heading>, &'static str> {
+    match bearing {
+        None => Ok(None),
+        Some(b) if (0.0..360.0).contains(&b) => Ok(Some(Heading {
+            bearing_deg: b,
+            tol_deg,
+        })),
+        Some(_) => Err(BAD_BEARING),
+    }
+}
+
 fn batch_size(n: usize) -> Result<(), String> {
     if n > MAX_BATCH {
         return Err(format!("at most {MAX_BATCH} points per batch"));
@@ -181,6 +203,8 @@ pub struct SnapParams {
     radius: Option<f64>,
     lang: Option<String>,
     roads: Option<String>,
+    bearing: Option<f64>,
+    bearing_tol: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +213,9 @@ pub struct BatchPoint {
     lon: f64,
     #[serde(default)]
     id: Option<serde_json::Value>,
+    /// Snap batches only: the vehicle heading at this point.
+    #[serde(default)]
+    bearing: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -207,12 +234,18 @@ pub struct SnapBatchRequest {
     radius: Option<f64>,
     lang: Option<String>,
     roads: Option<String>,
+    bearing_tol: Option<f64>,
 }
 
 /// One kind of per-point work in a batch.
 trait BatchOp: Send + Sync + 'static {
     type Out<'a>: Serialize + Send;
-    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Self::Out<'a>, &'static str>;
+    fn run<'a>(
+        &self,
+        idx: &'a Index,
+        pt: Point,
+        bearing: Option<f64>,
+    ) -> Result<Self::Out<'a>, &'static str>;
 }
 
 /// A reverse lookup; `pt` is replaced per point.
@@ -220,7 +253,12 @@ struct ReverseOp(lookup::Query);
 
 impl BatchOp for ReverseOp {
     type Out<'a> = Answer<'a>;
-    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Answer<'a>, &'static str> {
+    fn run<'a>(
+        &self,
+        idx: &'a Index,
+        pt: Point,
+        _: Option<f64>,
+    ) -> Result<Answer<'a>, &'static str> {
         Ok(idx.lookup(&lookup::Query { pt, ..self.0 }))
     }
 }
@@ -229,12 +267,19 @@ struct SnapOp {
     radius_m: f64,
     lang: Option<u32>,
     vehicle: bool,
+    bearing_tol: f64,
 }
 
 impl BatchOp for SnapOp {
     type Out<'a> = Snapped<'a>;
-    fn run<'a>(&self, idx: &'a Index, pt: Point) -> Result<Snapped<'a>, &'static str> {
-        idx.snap(pt, self.radius_m, self.lang, self.vehicle)
+    fn run<'a>(
+        &self,
+        idx: &'a Index,
+        pt: Point,
+        bearing: Option<f64>,
+    ) -> Result<Snapped<'a>, &'static str> {
+        let h = heading(bearing, self.bearing_tol)?;
+        idx.snap(pt, self.radius_m, self.lang, self.vehicle, h)
             .ok_or(NO_ROAD)
     }
 }
@@ -265,7 +310,7 @@ async fn run_batch<O: BatchOp>(st: Arc<AppState>, points: Vec<BatchPoint>, op: O
             return not_ready();
         };
         let one = |p: &BatchPoint| match Point::from_deg(p.lat, p.lon) {
-            Some(pt) => timed(&st.metrics, || op.run(idx, pt)),
+            Some(pt) => timed(&st.metrics, || op.run(idx, pt, p.bearing)),
             None => Err(BAD_COORDS),
         };
         let outs: Vec<_> = if points.len() >= PARALLEL_FROM {
@@ -339,15 +384,18 @@ async fn snap(State(st): St, q: Result<Query<SnapParams>, QueryRejection>) -> Re
     st.metrics.snap.fetch_add(1, Ordering::Relaxed);
     let run = || -> Result<Response, Response> {
         let p = query(&st, q)?;
-        let idx = index(&st)?;
         let bad = |e: String| bad(&st, e);
         let pt = point(p.lat, p.lon).map_err(bad)?;
+        let bearing_tol = bearing_tol(p.bearing_tol).map_err(bad)?;
+        heading(p.bearing, bearing_tol).map_err(|e| bad(e.into()))?;
+        let idx = index(&st)?;
         let op = SnapOp {
             radius_m: radius(p.radius).map_err(bad)?,
             lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
             vehicle: vehicle_only(p.roads.as_deref()).map_err(bad)?,
+            bearing_tol,
         };
-        Ok(match timed(&st.metrics, || op.run(idx, pt)) {
+        Ok(match timed(&st.metrics, || op.run(idx, pt, p.bearing)) {
             Ok(s) => Json(s).into_response(),
             Err(e) => error(StatusCode::NOT_FOUND, e),
         })
@@ -366,6 +414,7 @@ async fn snap_batch(State(st): St, b: Result<Json<SnapBatchRequest>, JsonRejecti
             radius_m: radius(req.radius).map_err(bad)?,
             lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
             vehicle: vehicle_only(req.roads.as_deref()).map_err(bad)?,
+            bearing_tol: bearing_tol(req.bearing_tol).map_err(bad)?,
         };
         Ok((req.points, op))
     };
@@ -596,6 +645,8 @@ mod tests {
             "/v1/snap?lat=1&lon=1&radius=x",
             "/reverse?lat=1&lon=1&distance=x",
             "/v1/reverse?lat=1&lon=1&admin_only=maybe",
+            "/v1/snap?lat=1&lon=1&bearing=400",
+            "/v1/snap?lat=1&lon=1&bearing=90&bearing_tol=0",
         ] {
             let res = empty()
                 .oneshot(Request::get(u).body(Body::empty()).unwrap())

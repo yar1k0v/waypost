@@ -87,6 +87,49 @@ pub struct Answer<'a> {
     pub source: Source<'a>,
 }
 
+/// Largest difference between a heading and a road, in degrees, when the
+/// caller gives none.
+pub const DEFAULT_BEARING_TOL_DEG: f64 = 45.0;
+
+/// Travel direction of a vehicle, to pick the road it drives along at
+/// junctions and on parallel roads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Heading {
+    /// Degrees clockwise from north, in [0, 360).
+    pub bearing_deg: f64,
+    /// Largest accepted difference to a road segment's direction, in (0, 180].
+    pub tol_deg: f64,
+}
+
+impl Heading {
+    /// The direction of travel along a segment with direction `seg_deg`, or
+    /// `None` when neither direction is within the tolerance. Both
+    /// directions count, because one-way roads are not stored.
+    pub fn along(&self, seg_deg: f64) -> Option<f64> {
+        let diff = |d: f64| {
+            let x = (d - self.bearing_deg).rem_euclid(360.0);
+            x.min(360.0 - x)
+        };
+        let rev = (seg_deg + 180.0).rem_euclid(360.0);
+        let (fwd_diff, rev_diff) = (diff(seg_deg), diff(rev));
+        if fwd_diff <= self.tol_deg && fwd_diff <= rev_diff {
+            Some(seg_deg)
+        } else if rev_diff <= self.tol_deg {
+            Some(rev)
+        } else {
+            None
+        }
+    }
+}
+
+/// Direction of segment `a`-`b` in degrees clockwise from north, or `None`
+/// for a zero-length segment.
+fn segment_bearing(f: &LocalFrame, a: Point, b: Point) -> Option<f64> {
+    let ((ax, ay), (bx, by)) = (f.xy(a), f.xy(b));
+    let (dx, dy) = (bx - ax, by - ay);
+    (dx != 0.0 || dy != 0.0).then(|| dx.atan2(dy).to_degrees().rem_euclid(360.0))
+}
+
 /// Result of a snap: the nearest point on a road.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Snapped<'a> {
@@ -94,6 +137,9 @@ pub struct Snapped<'a> {
     pub lon: f64,
     /// Metres from the query point to the snapped point.
     pub distance_m: f64,
+    /// Direction of the road at the snapped point, degrees clockwise from
+    /// north. With a heading, the direction of travel; else the way's own direction.
+    pub bearing_deg: u16,
     pub road: Road<'a>,
     pub source: Source<'a>,
 }
@@ -431,18 +477,20 @@ impl Index {
             })
     }
 
-    /// Nearest road segment within `radius` among ways that `keep` accepts.
-    /// Returns the way (in `Best::id`) and the projection onto the segment.
+    /// Nearest road segment within `radius` among ways that `keep` accepts
+    /// and, with a heading, whose direction matches it. Returns the way (in
+    /// `Best::id`), the projection onto the segment and the segment direction.
     fn nearest_piece(
         &self,
         f: &LocalFrame,
         radius: f64,
+        heading: Option<Heading>,
         keep: impl Fn(&Way) -> bool,
-    ) -> Option<(Best, Projection)> {
+    ) -> Option<(Best, Projection, f64)> {
         let pieces: &[Piece] = self.v(&self.s.pieces);
         let nodes: &[Point] = self.v(&self.s.nodes);
         let ways: &[Way] = self.v(&self.s.ways);
-        let mut best: Option<(Best, Projection)> = None;
+        let mut best: Option<(Best, Projection, f64)> = None;
         for id in self.ids_near(
             &self.street_grid,
             &self.s.piece_grid,
@@ -457,16 +505,27 @@ impl Index {
             let pts = &nodes[p.node_off as usize..(p.node_off + p.n as u64) as usize];
             for w in pts.windows(2) {
                 let pr = f.project(w[0], w[1]);
-                if pr.dist <= radius && best.is_none_or(|(b, _)| pr.dist < b.dist) {
-                    best = Some((
-                        Best {
-                            dist: pr.dist,
-                            id: p.way,
-                            t: pr.t,
-                        },
-                        pr,
-                    ));
+                if pr.dist > radius || best.is_some_and(|(b, _, _)| pr.dist >= b.dist) {
+                    continue;
                 }
+                let seg = segment_bearing(f, w[0], w[1]);
+                let dir = match (heading, seg) {
+                    (None, s) => s.unwrap_or(0.0),
+                    (Some(h), Some(s)) => match h.along(s) {
+                        Some(d) => d,
+                        None => continue,
+                    },
+                    (Some(_), None) => continue,
+                };
+                best = Some((
+                    Best {
+                        dist: pr.dist,
+                        id: p.way,
+                        t: pr.t,
+                    },
+                    pr,
+                    dir,
+                ));
             }
         }
         best
@@ -474,13 +533,15 @@ impl Index {
 
     /// The nearest point on a road within `radius_m` (clamped to
     /// `MAX_RADIUS_M`), or `None` when there is no road that close. With
-    /// `vehicle_only`, pedestrian ways are skipped.
+    /// `vehicle_only`, pedestrian ways are skipped. With a heading, only road
+    /// segments that run that way (in either direction) count.
     pub fn snap(
         &self,
         pt: Point,
         radius_m: f64,
         lang: Option<u32>,
         vehicle_only: bool,
+        heading: Option<Heading>,
     ) -> Option<Snapped<'_>> {
         let radius = if radius_m > 0.0 {
             radius_m.min(MAX_RADIUS_M)
@@ -488,7 +549,7 @@ impl Index {
             DEFAULT_RADIUS_M
         };
         let f = LocalFrame::new(pt);
-        let (b, pr) = self.nearest_piece(&f, radius, |w| {
+        let (b, pr, dir) = self.nearest_piece(&f, radius, heading, |w| {
             !vehicle_only || RoadClass::from_u8(w.class) != RoadClass::Pedestrian
         })?;
         let way = &self.v::<Way>(&self.s.ways)[b.id as usize];
@@ -497,6 +558,7 @@ impl Index {
             lat: at.lat_deg(),
             lon: at.lon_deg(),
             distance_m: (b.dist * 10.0).round() / 10.0,
+            bearing_deg: (dir.round() as u16) % 360,
             road: Road {
                 name: if way.name == NONE {
                     None
@@ -758,7 +820,9 @@ impl Index {
         // are on. A house number comes only from a house on that road. With
         // no road in range (or, under Hybrid, a house nearer than any road),
         // the nearest house names the address.
-        let street = self.nearest_piece(&f, radius, |w| w.name != NONE);
+        let street = self
+            .nearest_piece(&f, radius, None, |w| w.name != NONE)
+            .map(|(b, pr, _)| (b, pr));
         let addrs: &[Addr] = self.v(&self.s.addrs);
         let interps: &[Interp] = self.v(&self.s.interps);
         let ways: &[Way] = self.v(&self.s.ways);
@@ -987,20 +1051,31 @@ mod tests {
         let city = names.add(strings.add("Алматы"), &[(0, strings.add("Almaty"))]);
         let village = names.add(strings.add("Ауыл"), &[]);
 
-        let nodes = vec![at(0, 0), at(0, 20_000)];
-        let ways = [Way {
-            name: road,
+        let cross = names.add(strings.add("Тест"), &[]);
+        // Way 0 runs east (bearing 90) and crosses way 1, which runs north (bearing 0) about
+        // 244 m east of the origin.
+        let nodes = vec![at(0, 0), at(0, 40_000), at(-500, 30_000), at(500, 30_000)];
+        let way = |name, maxspeed, osm_id| Way {
+            name,
             class: RoadClass::Residential as u8,
             _pad: [0; 3],
-            maxspeed: 60,
+            maxspeed,
             _pad2: [0; 6],
-            osm_id: 500,
-        }];
-        let pieces = [Piece {
-            node_off: 0,
-            way: 0,
-            n: 2,
-        }];
+            osm_id,
+        };
+        let ways = [way(road, 60, 500), way(cross, 0, 501)];
+        let pieces = [
+            Piece {
+                node_off: 0,
+                way: 0,
+                n: 2,
+            },
+            Piece {
+                node_off: 2,
+                way: 1,
+                n: 2,
+            },
+        ];
         let mut addr = |pt, hn: &str, street: &str, id| Addr {
             pt,
             housenumber: strings.add(hn),
@@ -1052,8 +1127,19 @@ mod tests {
             size: settings.admin_cell,
         };
         let mut g = GridBuilder::default();
-        for (r, c) in sg.cells_in_box(nodes[0], nodes[1]) {
-            g.insert(GridSpec::key(r, c), 0);
+        for (i, p) in pieces.iter().enumerate() {
+            let (a, b) = (nodes[p.node_off as usize], nodes[p.node_off as usize + 1]);
+            let sw = Point {
+                lat: a.lat.min(b.lat),
+                lon: a.lon.min(b.lon),
+            };
+            let ne = Point {
+                lat: a.lat.max(b.lat),
+                lon: a.lon.max(b.lon),
+            };
+            for (r, c) in sg.cells_in_box(sw, ne) {
+                g.insert(GridSpec::key(r, c), i as u32);
+            }
         }
         let (piece_grid, piece_ids) = g.finish();
         let mut g = GridBuilder::default();
@@ -1199,11 +1285,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = world(dir.path());
         let q = query(&idx, 20, 5_000);
-        let s = idx.snap(q.pt, 50.0, q.lang, true).unwrap();
+        let s = idx.snap(q.pt, 50.0, q.lang, true, None).unwrap();
         assert!((s.distance_m - 20.0).abs() < 0.5, "{}", s.distance_m);
+        assert_eq!(s.bearing_deg, 90);
         assert_eq!(s.road.maxspeed_kmh, Some(60));
         assert_eq!(s.source.osm_type, Some("way"));
         assert_eq!(s.source.osm_id, Some(500));
-        assert!(idx.snap(q.pt, 10.0, None, true).is_none());
+        assert!(idx.snap(q.pt, 10.0, None, true, None).is_none());
+    }
+
+    #[test]
+    fn heading_picks_the_road_driven_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        // 20 m north of the east road, about 24 m west of the north road.
+        let pt = query(&idx, 20, 27_000).pt;
+        let snap = |bearing: Option<f64>, tol: f64| {
+            let h = bearing.map(|b| Heading {
+                bearing_deg: b,
+                tol_deg: tol,
+            });
+            idx.snap(pt, 100.0, None, true, h)
+                .map(|s| (s.road.osm_way_id, s.bearing_deg))
+        };
+        // Without a heading the nearer road wins.
+        assert_eq!(snap(None, 45.0), Some((500, 90)));
+        // Heading north or south: the farther north road, in the travel direction.
+        assert_eq!(snap(Some(10.0), 45.0), Some((501, 0)));
+        assert_eq!(snap(Some(185.0), 45.0), Some((501, 180)));
+        // Heading west matches the east road driven the other way.
+        assert_eq!(snap(Some(265.0), 45.0), Some((500, 270)));
+        // No road runs north-east within 20 degrees.
+        assert_eq!(snap(Some(45.0), 20.0), None);
+    }
+
+    #[test]
+    fn heading_tolerance_wraps_around_north() {
+        let h = Heading {
+            bearing_deg: 350.0,
+            tol_deg: 20.0,
+        };
+        assert_eq!(h.along(5.0), Some(5.0));
+        assert_eq!(h.along(185.0), Some(5.0));
+        assert_eq!(h.along(40.0), None);
     }
 }
