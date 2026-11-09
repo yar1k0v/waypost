@@ -11,10 +11,10 @@
 
 waypost turns coordinates into addresses, and snaps them to the nearest road. It runs on your own machine from OpenStreetMap data, with no external API and no per-request fees.
 
-- **Fast:** about 18 µs per lookup, and batches of 10,000 points in one request.
+- **Fast:** about 30 µs per lookup on one thread, and about 58,000 points per second in batches of up to 10,000 (Switzerland, one desktop machine).
 - **Exact:** admin borders keep every vertex and every hole. No simplified polygons.
 - **Multilingual:** answers in any language OSM has, for example `de`, `fr`, `it`, `en`.
-- **Small:** one index file. Switzerland takes 333 MB on disk and about 325 MB of server RAM.
+- **Small:** one index file. Switzerland takes 369 MB on disk. The server maps it, so its RAM is about the file size.
 - **Easy to run:** `docker compose up` builds the index and starts the server.
 - **Checked:** CI compares 10,000 answers of the old and new code on every pull request.
 
@@ -48,7 +48,8 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.9466&lon=7.4441&lang=en'
     "country": "Switzerland",
     "country_code": "CH"
   },
-  "display": "Bundesplatz 3, Gelbes Quartier, Bern, Bernese Mittelland administrative region, Bern, 3011, Switzerland"
+  "display": "Bundesplatz 3, Gelbes Quartier, Bern, Bernese Mittelland administrative region, Bern, 3011, Switzerland",
+  "source": { "osm_type": "way", "osm_id": 254958900, "data_date": "2026-11-08T21:21:00Z" }
 }
 ```
 

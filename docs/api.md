@@ -22,15 +22,17 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 {"match":"address","distance_m":0.8,
  "address":{"house_number":"2","street":"Place de Bel-Air","road_class":"residential","suburb":"Cité",
             "locality":"Genève","state":"Genève","postcode":"1204","country":"Suisse","country_code":"CH"},
- "display":"Place de Bel-Air 2, Cité, Genève, 1204, Suisse"}
+ "display":"Place de Bel-Air 2, Cité, Genève, 1204, Suisse",
+ "source":{"osm_type":"node","osm_id":1083432136,"data_date":"2026-11-08T21:21:00Z"}}
 ```
 
 | Field | Meaning |
 |---|---|
 | `match` | `address`, `interpolated`, `street`, `place` (settlement only), `admin` (areas only), `none` |
-| `distance_m` | Metres to the matched road, house or settlement |
+| `distance_m` | Metres to the matched road, house or settlement. 0 when an area that contains the point decided the match. Absent for `none` |
 | `address.*` | `house_number`, `street`, `road_class`, `suburb`, `locality`, `district`, `state`, `postcode`, `country`, `country_code`; absent fields are omitted |
 | `display` | One-line address |
+| `source` | `osm_type` (`node`, `way`, `relation`) and `osm_id` of the object that decided `match`, plus `data_date` of the index's OSM data. `osm_*` absent for `none` |
 
 ## POST /v1/reverse/batch
 
@@ -54,7 +56,8 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 
 ```json
 {"lat":46.9479729,"lon":7.4474197,"distance_m":3.4,
- "road":{"name":"Marktgasse","class":"residential","maxspeed_kmh":30,"osm_way_id":691907770}}
+ "road":{"name":"Marktgasse","class":"residential","maxspeed_kmh":30,"osm_way_id":691907770},
+ "source":{"osm_type":"way","osm_id":691907770,"data_date":"2026-11-08T21:21:00Z"}}
 ```
 
 404 `{"error":"no road within radius"}` when no road is that close.
@@ -88,7 +91,7 @@ For clients written against the older geocoder contract. They answer in that con
 
 | Status | When |
 |---|---|
-| 400 | Missing or out-of-range `lat`/`lon`, bad `radius`, unknown `lang`, `street` or `roads`, batch over 10,000 points, bad JSON |
+| 400 | Missing, unparsable or out-of-range `lat`/`lon`, bad `radius` or `admin_only`, unknown `lang`, `street` or `roads`, batch over 10,000 points, bad JSON |
 | 404 | `/v1/snap` and `/snap`: no road within the radius |
 | 503 | Index still loading |
 

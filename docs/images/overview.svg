@@ -94,7 +94,7 @@
     <text x="310" y="219" class="c2">about 1 min</text>
     <text x="510" y="219" class="c3">10 s</text>
     <text x="710" y="219" class="c4">333 MB</text>
-    <text x="910" y="219" class="c5">≈ 18 µs / lookup</text>
+    <text x="910" y="219" class="c5">≈ 30 µs / lookup</text>
   </g>
 
   <!-- arrows -->

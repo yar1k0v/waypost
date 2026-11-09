@@ -11,6 +11,8 @@ Settings live in `waypost.env`:
 | `REBUILD` | `0` | `1` forces a rebuild, for example to pick up fresh OSM data |
 | `WAYPOST_PORT` | `8088` | Host port. Set it in the shell or in `.env`, not in `waypost.env` |
 
+The index rebuilds by itself when `PBF_URLS`, `WAYPOST_LANGS` or the builder image changes.
+
 ```sh
 docker compose up -d                  # first run downloads and builds
 docker compose logs -f index          # build progress
@@ -55,8 +57,9 @@ Measured on Switzerland, OSM data of 2026-11-08:
 | Extract download | 550 MB | |
 | osmium prep | about 1 min | Dominates build time |
 | Index build | 10 s | |
-| Index file | 333 MB | Grows with roads and addresses |
-| Server memory, warmed | about 325 MB | Index size plus a small heap. The page cache counts toward a container memory limit |
+| Index file | 369 MB | Grows with roads and addresses |
+| Server memory, warmed | about the index size | Index size plus a small heap. The page cache counts toward a container memory limit |
+| Lookup latency | `cargo run --release -p waypost-core --example bench -- <index> <points.jsonl>` | Prints p50, p99 and lookups per second on one thread |
 
 Set a server memory limit of index size + 256 MB or more.
 
@@ -71,6 +74,7 @@ Set a server memory limit of index size + 256 MB or more.
 | Against another geocoder's stored answers | `python tools/compare_reference.py data/reference-reverse.jsonl http://127.0.0.1:8088` |
 
 - CI (`.github/workflows/accuracy.yml`) builds the base branch and the pull request on the same Switzerland index. It fails when any field changes on more than 0.5% of points.
+- It runs on pull requests that change `crates/`, `tools/`, `scripts/`, `Cargo.toml`, `Cargo.lock` or the workflow itself.
 - Test points and answers stay in `data/` (git-ignored). The repository holds no OSM data.
 - ⚠ Keep real location data in `data/` only. Never commit it.
 
