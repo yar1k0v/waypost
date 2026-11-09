@@ -109,7 +109,7 @@ cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test
 | `tools/` | Test point generator and accuracy comparison (Python, stdlib only) |
 | `docker/`, `compose.yaml`, `waypost.env` | Images, compose setup and its settings |
 
-Releases: push a tag `vX.Y.Z`. CI publishes `ghcr.io/yar1k0v/waypost-server` and `ghcr.io/yar1k0v/waypost-builder`.
+Releases are automatic. Commits on `main` use [Conventional Commits](https://www.conventionalcommits.org); a `feat`, `fix`, `perf` or breaking commit gets a new `vX.Y.Z` tag and images `ghcr.io/yar1k0v/waypost-server` and `ghcr.io/yar1k0v/waypost-builder`. See [docs/operations.md](docs/operations.md#release).
 
 ## License
 

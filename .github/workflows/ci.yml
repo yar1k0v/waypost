@@ -15,6 +15,13 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked
 
+  # Release version logic (tools/release.py).
+  release-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tools -p "test_release.py"
+
   # Builds with the oldest Rust that Cargo.toml `rust-version` allows.
   msrv:
     runs-on: ubuntu-24.04

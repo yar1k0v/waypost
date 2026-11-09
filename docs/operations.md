@@ -80,11 +80,23 @@ Set a server memory limit of index size + 256 MB or more.
 
 ## Release
 
-1. Update `version` in `Cargo.toml` (workspace).
-2. Tag: `git tag v0.1.0 && git push origin v0.1.0`.
-3. `.github/workflows/release.yml` builds and pushes `ghcr.io/yar1k0v/waypost-server:<version>` and `ghcr.io/yar1k0v/waypost-builder:<version>`.
+Releases are automatic. Nobody edits `version` or pushes tags by hand.
 
-Images never ship as `latest` only: every release has a version tag.
+1. Write commits as [Conventional Commits](https://www.conventionalcommits.org): `type(scope): summary`.
+2. When `ci` passes on `main`, `.github/workflows/release.yml` runs `tools/release.py next`. It reads the commits since the last `vX.Y.Z` tag.
+3. If a release is due, the workflow bumps `Cargo.toml` and `Cargo.lock`, commits `chore(release): vX.Y.Z`, tags it, and pushes both.
+4. It builds and pushes `ghcr.io/yar1k0v/waypost-server` and `ghcr.io/yar1k0v/waypost-builder` with the tags `X.Y.Z` and `latest`, then creates a GitHub release.
+
+| Commit | Version 0.x | Version 1.x and later |
+|---|---|---|
+| `type!:` or `BREAKING CHANGE:` footer | minor | major |
+| `feat` | patch | minor |
+| `fix`, `perf` | patch | patch |
+| `docs`, `build`, `ci`, `chore`, `test`, `refactor`, `style` | no release | no release |
+
+- Version 1.0.0 is a manual step: set `version` to `1.0.0` in `Cargo.toml`, `Cargo.lock` and the crate path dependencies, then tag `v1.0.0`.
+- If the image build fails, the tag already exists. Run the `release` workflow by hand with `tag` set to `vX.Y.Z` to rebuild only the images.
+- Test the version logic with `python tools/test_release.py`. Preview the next version with `python tools/release.py next`.
 
 ## When it breaks
 

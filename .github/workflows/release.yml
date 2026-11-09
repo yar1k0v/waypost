@@ -1,22 +1,76 @@
 name: release
-# Tag vX.Y.Z → ghcr.io/yar1k0v/waypost-server:X.Y.Z and waypost-builder:X.Y.Z.
+# After ci passes on main, tools/release.py reads the Conventional Commits since
+# the last tag. If a release is due it bumps the version, commits, tags vX.Y.Z,
+# pushes, and publishes ghcr.io/yar1k0v/waypost-{server,builder}:X.Y.Z and :latest.
+# Rules are in tools/release.py. Manual run with a tag rebuilds that tag's images.
 on:
-  push:
-    tags: ["v*.*.*"]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild images for (vX.Y.Z). Empty: normal release check."
+        required: false
+concurrency:
+  group: release
+  cancel-in-progress: false
 permissions:
-  contents: read
+  contents: write
   packages: write
 jobs:
+  version:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Decide version
+        id: v
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            echo "version=${INPUT_TAG#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A newer push exists: its own ci run will release it.
+          if [ -n "$CI_SHA" ] && [ "$(git rev-parse HEAD)" != "$CI_SHA" ]; then
+            echo "main moved past $CI_SHA, skipping"
+            exit 0
+          fi
+          version="$(python3 tools/release.py next)"
+          if [ -z "$version" ]; then
+            echo "no release due"
+            exit 0
+          fi
+          python3 tools/release.py bump "$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): v$version"
+          git tag -a "v$version" -m "waypost $version"
+          git push --atomic origin HEAD:main "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   images:
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: ubuntu-24.04
     strategy:
       matrix:
         target: [server, builder]
     steps:
       - uses: actions/checkout@v4
-      - name: Version from tag
-        id: v
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        with:
+          ref: v${{ needs.version.outputs.version }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -30,9 +84,21 @@ jobs:
           target: ${{ matrix.target }}
           push: true
           tags: |
-            ghcr.io/yar1k0v/waypost-${{ matrix.target }}:${{ steps.v.outputs.version }}
+            ghcr.io/yar1k0v/waypost-${{ matrix.target }}:${{ needs.version.outputs.version }}
+            ghcr.io/yar1k0v/waypost-${{ matrix.target }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/yar1k0v/waypost
-            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+  github-release:
+    needs: [version, images]
+    if: needs.version.outputs.version != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG"
