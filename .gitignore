@@ -1,0 +1,7 @@
+stone.exe
+/stone/
+/target/
+/.stone/
+/data/
+__pycache__/
+CLAUDE.local.md

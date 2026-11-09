@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>waypost overview: OSM extracts are prepared, built into one index, and served over HTTP</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="960" height="300" rx="16" fill="#f8fafc"/>
+
+  <!-- Geofabrik -->
+  <rect x="24" y="96" width="150" height="96" rx="12" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text x="99" y="134" text-anchor="middle" font-size="16" font-weight="600" fill="#0f172a">OSM extracts</text>
+  <text x="99" y="156" text-anchor="middle" font-size="13" fill="#334155">Geofabrik .osm.pbf</text>
+  <text x="99" y="174" text-anchor="middle" font-size="13" fill="#334155">per country</text>
+
+  <line x1="174" y1="144" x2="222" y2="144" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Builder -->
+  <rect x="224" y="60" width="250" height="168" rx="12" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="349" y="88" text-anchor="middle" font-size="16" font-weight="600" fill="#1e3a8a">waypost-builder</text>
+  <text x="349" y="106" text-anchor="middle" font-size="12" fill="#1e40af">runs once per data update</text>
+  <rect x="244" y="120" width="210" height="40" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="349" y="145" text-anchor="middle" font-size="13" fill="#1e293b">osmium: areas + way locations</text>
+  <rect x="244" y="170" width="210" height="40" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="349" y="195" text-anchor="middle" font-size="13" fill="#1e293b">Rust: grids, names, edge cells</text>
+
+  <line x1="474" y1="144" x2="522" y2="144" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Index -->
+  <path d="M524,104 a56,14 0 0,0 112,0 v80 a56,14 0 0,1 -112,0 z" fill="#fef3c7" stroke="#f59e0b"/>
+  <ellipse cx="580" cy="104" rx="56" ry="14" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="580" y="146" text-anchor="middle" font-size="15" font-weight="600" fill="#78350f">index</text>
+  <text x="580" y="166" text-anchor="middle" font-size="12" fill="#92400e">one .wpi file</text>
+  <text x="580" y="182" text-anchor="middle" font-size="12" fill="#92400e">immutable</text>
+
+  <line x1="636" y1="144" x2="684" y2="144" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="660" y="132" text-anchor="middle" font-size="11" fill="#475569">mmap</text>
+
+  <!-- Server -->
+  <rect x="686" y="60" width="250" height="168" rx="12" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="811" y="88" text-anchor="middle" font-size="16" font-weight="600" fill="#14532d">waypost-server</text>
+  <text x="811" y="106" text-anchor="middle" font-size="12" fill="#166534">HTTP on port 8080</text>
+  <text x="811" y="138" text-anchor="middle" font-size="13" fill="#1e293b">/v1/reverse  ·  /v1/snap</text>
+  <text x="811" y="160" text-anchor="middle" font-size="13" fill="#1e293b">batch: 10,000 points</text>
+  <text x="811" y="182" text-anchor="middle" font-size="13" fill="#1e293b">lock-free shared reads</text>
+  <text x="811" y="204" text-anchor="middle" font-size="13" fill="#1e293b">~18 µs per lookup</text>
+
+  <text x="480" y="268" text-anchor="middle" font-size="13" fill="#475569">Coordinates in → house number, street, locality, district, state, country, or the nearest road point</text>
+</svg>

@@ -1,0 +1,65 @@
+name: accuracy
+# A/B gate: builds the base branch and this branch on the same Switzerland
+# index, generates 10,000 test points from that index, queries both servers,
+# and fails when any field changes on more than 0.5% of points.
+# No OSM data is committed: points come from the index on every run.
+# For an intended change, raise --max-drop in the pull request.
+on:
+  pull_request:
+    paths: ["crates/**", "tools/**", "scripts/**"]
+  workflow_dispatch:
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: head
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+          path: base
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "head -> target\nbase -> target"
+      - name: Week key
+        id: week
+        run: echo "key=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Cache prepared data
+        id: data
+        uses: actions/cache@v4
+        with:
+          path: data/prep
+          key: ch-prep-${{ steps.week.outputs.key }}
+      - name: Prepare data
+        if: steps.data.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends osmium-tool
+          mkdir -p data
+          curl -fSL -o data/switzerland-latest.osm.pbf.part https://download.geofabrik.de/europe/switzerland-latest.osm.pbf
+          mv data/switzerland-latest.osm.pbf.part data/switzerland-latest.osm.pbf
+          sh head/scripts/prep.sh data/switzerland-latest.osm.pbf data/prep
+      - name: Build both
+        run: |
+          (cd head && cargo build --release --locked)
+          (cd base && cargo build --release --locked)
+      - name: Index both
+        run: |
+          head/target/release/waypost-builder --out data/head.wpi --langs en,de,fr,it data/prep/switzerland-latest
+          base/target/release/waypost-builder --out data/base.wpi --langs en,de,fr,it data/prep/switzerland-latest
+      - name: Test points
+        run: python3 head/tools/golden_gen.py --index data/base.wpi --n 10000 --seed 1 --out data/points.jsonl
+      - name: Compare
+        run: |
+          head/target/release/waypost-server --index data/head.wpi --listen 127.0.0.1:8088 &
+          base/target/release/waypost-server --index data/base.wpi --listen 127.0.0.1:8089 &
+          for i in $(seq 60); do curl -sf 127.0.0.1:8088/readyz && curl -sf 127.0.0.1:8089/readyz && break; sleep 1; done
+          python3 head/tools/compare.py --golden data/points.jsonl \
+            --waypost http://127.0.0.1:8088 --against http://127.0.0.1:8089 \
+            --max-drop 0.5 --report report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accuracy-report
+          path: report.json

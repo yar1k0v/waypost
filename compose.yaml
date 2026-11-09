@@ -1,0 +1,26 @@
+# Local waypost: builds an index from the extracts in waypost.env, then serves it.
+#   docker compose up -d   first run downloads and builds, later runs reuse the index
+# Settings live in waypost.env. After a change: docker compose up -d --force-recreate
+name: waypost
+
+services:
+  index:
+    build: { context: ., dockerfile: docker/Dockerfile, target: builder }
+    image: waypost-builder:local
+    env_file: waypost.env
+    volumes:
+      - index:/index
+
+  server:
+    build: { context: ., dockerfile: docker/Dockerfile, target: server }
+    image: waypost-server:local
+    depends_on:
+      index: { condition: service_completed_successfully }
+    volumes:
+      - index:/index:ro
+    ports:
+      - "${WAYPOST_PORT:-8088}:8080"
+    restart: unless-stopped
+
+volumes:
+  index:
