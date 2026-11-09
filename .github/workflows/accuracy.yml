@@ -6,7 +6,7 @@ name: accuracy
 # For an intended change, raise --max-drop in the pull request.
 on:
   pull_request:
-    paths: ["crates/**", "tools/**", "scripts/**"]
+    paths: ["crates/**", "tools/**", "scripts/**", "Cargo.toml", "Cargo.lock", ".github/workflows/accuracy.yml"]
   workflow_dispatch:
 jobs:
   gate:
