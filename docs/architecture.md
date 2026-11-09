@@ -49,6 +49,8 @@ sequenceDiagram
 
 ## Lookup
 
+![One reverse lookup](images/lookup.svg)
+
 One lookup reads a few grid cells. No locks: the index is immutable and shared by all threads.
 
 | Step | Grid | Finds |

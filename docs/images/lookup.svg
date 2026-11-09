@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 330" width="1080" height="330" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>One reverse lookup: admin areas, then the nearest street, then the nearest house number</title>
+  <style>
+    .bg{fill:#ffffff;stroke:#d0d7de}
+    .card{fill:#f6f8fa;stroke:#d0d7de}
+    .t{fill:#1f2328}
+    .m{fill:#59636e}
+    .ln{stroke:#8c959f}
+    .ar{fill:#8c959f}
+    .acc{fill:#0969da}
+    .accs{stroke:#0969da}
+    .out{fill:#ddf4ff;stroke:#54aeff}
+    .outt{fill:#0a3069}
+    .f{fill:#1a7f37}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117;stroke:#30363d}
+      .card{fill:#161b22;stroke:#30363d}
+      .t{fill:#e6edf3}
+      .m{fill:#9198a1}
+      .ln{stroke:#6e7681}
+      .ar{fill:#6e7681}
+      .acc{fill:#4493f8}
+      .accs{stroke:#4493f8}
+      .out{fill:#0c2d6b;stroke:#1f6feb}
+      .outt{fill:#cae8ff}
+      .f{fill:#3fb950}
+    }
+  </style>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="ar"/>
+    </marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="1079" height="329" rx="20" class="bg"/>
+
+  <!-- request -->
+  <rect x="30" y="40" width="180" height="170" rx="12" class="card"/>
+  <text x="50" y="72" font-size="12" font-weight="600" letter-spacing="1" class="acc">REQUEST</text>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="14" class="t">
+    <text x="50" y="104">GET /v1/reverse</text>
+    <text x="50" y="132" class="m">lat=46.9466</text>
+    <text x="50" y="156" class="m">lon=7.4441</text>
+    <text x="50" y="180" class="m">lang=en</text>
+  </g>
+
+  <!-- steps -->
+  <g>
+    <rect x="250" y="40" width="240" height="170" rx="12" class="card"/>
+    <rect x="530" y="40" width="240" height="170" rx="12" class="card"/>
+    <rect x="810" y="40" width="240" height="170" rx="12" class="card"/>
+  </g>
+  <g font-size="12" font-weight="600" letter-spacing="1" class="acc">
+    <text x="270" y="72">STEP 1 · ADMIN AREAS</text>
+    <text x="550" y="72">STEP 2 · STREET</text>
+    <text x="830" y="72">STEP 3 · HOUSE</text>
+  </g>
+  <g font-size="13" class="m">
+    <text x="270" y="100">admin grid, 0.05° cells</text>
+    <text x="270" y="120">exact point-in-polygon</text>
+    <text x="550" y="100">street grid, 0.005° cells</text>
+    <text x="550" y="120">nearest named road</text>
+    <text x="550" y="140">within the radius (100 m)</text>
+    <text x="830" y="100">same street cells</text>
+    <text x="830" y="120">nearest address point</text>
+    <text x="830" y="140">or an interpolated number</text>
+  </g>
+  <g font-size="13" font-weight="600" class="f">
+    <text x="270" y="166">→ country, state, district,</text>
+    <text x="270" y="186">   locality, suburb, postcode</text>
+    <text x="550" y="186">→ street, road class</text>
+    <text x="830" y="186">→ house number</text>
+  </g>
+
+  <!-- arrows between cards -->
+  <g stroke-width="2" class="ln" marker-end="url(#arr)">
+    <line x1="212" y1="125" x2="246" y2="125"/>
+    <line x1="492" y1="125" x2="526" y2="125"/>
+    <line x1="772" y1="125" x2="806" y2="125"/>
+  </g>
+
+  <!-- arrows down into the answer -->
+  <g stroke-width="2" class="ln" marker-end="url(#arr)" fill="none">
+    <line x1="370" y1="212" x2="370" y2="246"/>
+    <line x1="650" y1="212" x2="650" y2="246"/>
+    <line x1="930" y1="212" x2="930" y2="246"/>
+  </g>
+
+  <!-- answer -->
+  <rect x="250" y="250" width="800" height="52" rx="12" class="out" stroke-width="1.5"/>
+  <text x="30" y="282" font-size="12" font-weight="600" letter-spacing="1" class="acc">ANSWER · 15.1 m</text>
+  <text x="650" y="282" text-anchor="middle" font-size="14" class="outt" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">Bundesplatz 3, Gelbes Quartier, Bern, …, 3011, Switzerland</text>
+</svg>

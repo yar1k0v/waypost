@@ -1,7 +1,7 @@
 """Generates a synthetic golden set of coordinates from a waypost index.
 
 Points are sampled near streets, address points and settlements, so they
-look like fleet positions. Output: JSON lines {"id", "lat", "lon", "kind"}.
+look like real GPS positions. Output: JSON lines {"id", "lat", "lon", "kind"}.
 
 Usage: python tools/golden_gen.py --index data/ch.wpi --n 10000 --out data/points.jsonl
 """

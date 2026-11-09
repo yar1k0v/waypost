@@ -72,7 +72,7 @@ Set a server memory limit of index size + 256 MB or more.
 
 - CI (`.github/workflows/accuracy.yml`) builds the base branch and the pull request on the same Switzerland index. It fails when any field changes on more than 0.5% of points.
 - Test points and answers stay in `data/` (git-ignored). The repository holds no OSM data.
-- ⚠ Keep real fleet positions in `data/` only. Never commit them.
+- ⚠ Keep real location data in `data/` only. Never commit it.
 
 ## Release
 

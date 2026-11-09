@@ -2,7 +2,7 @@
 
 Input: JSON lines {lat, lon, status, body}, where body is the reference
 service's response in the legacy /reverse format (display_name, address{road,
-city, county, ...}). Keep real fleet data in data/, never in the repo.
+city, county, ...}). Keep real location data in data/, never in the repo.
 
 Usage: python tools/compare_reference.py data/reference-reverse.jsonl http://127.0.0.1:8088 [--radius 75]
 """

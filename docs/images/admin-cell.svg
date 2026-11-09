@@ -1,47 +1,79 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" font-family="Segoe UI, Helvetica, Arial, sans-serif">
-  <title>Exact admin-area test inside one grid cell: count crossings from the cell centre to the query point</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Exact admin-area test inside one grid cell: count border crossings from the cell centre to the query point</title>
+  <style>
+    .bg{fill:#ffffff;stroke:#d0d7de}
+    .grid{stroke:#d0d7de}
+    .area{fill:#ddf4ff;stroke:#0969da}
+    .cell{stroke:#1f2328}
+    .t{fill:#1f2328}
+    .m{fill:#59636e}
+    .q{fill:#cf222e}
+    .qs{stroke:#cf222e}
+    .edge{stroke:#bf8700} .edgef{fill:#9a6700}
+    .card{fill:#f6f8fa;stroke:#d0d7de}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117;stroke:#30363d}
+      .grid{stroke:#30363d}
+      .area{fill:#0c2d6b;stroke:#4493f8}
+      .cell{stroke:#e6edf3}
+      .t{fill:#e6edf3}
+      .m{fill:#9198a1}
+      .q{fill:#ff7b72}
+      .qs{stroke:#ff7b72}
+      .edge{stroke:#d29922} .edgef{fill:#d29922}
+      .card{fill:#161b22;stroke:#30363d}
+    }
+  </style>
   <defs>
+    <clipPath id="cellclip"><rect x="180" y="50" width="140" height="140"/></clipPath>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+      <path d="M0,0 L10,5 L0,10 z" class="q"/>
     </marker>
   </defs>
-  <rect width="640" height="360" rx="16" fill="#f8fafc"/>
+  <rect x="0.5" y="0.5" width="759" height="379" rx="20" class="bg"/>
 
   <!-- grid -->
-  <g stroke="#cbd5e1" stroke-width="1">
-    <line x1="40" y1="40" x2="40" y2="320"/><line x1="180" y1="40" x2="180" y2="320"/>
-    <line x1="320" y1="40" x2="320" y2="320"/><line x1="460" y1="40" x2="460" y2="320"/>
-    <line x1="40" y1="40" x2="460" y2="40"/><line x1="40" y1="180" x2="460" y2="180"/>
-    <line x1="40" y1="320" x2="460" y2="320"/>
+  <g stroke-width="1" class="grid">
+    <line x1="40" y1="50" x2="40" y2="330"/><line x1="180" y1="50" x2="180" y2="330"/>
+    <line x1="320" y1="50" x2="320" y2="330"/><line x1="460" y1="50" x2="460" y2="330"/>
+    <line x1="40" y1="50" x2="460" y2="50"/><line x1="40" y1="190" x2="460" y2="190"/>
+    <line x1="40" y1="330" x2="460" y2="330"/>
   </g>
 
-  <!-- area (district) with a border crossing the middle cell -->
-  <path d="M40,40 L290,40 L275,120 L320,175 L300,250 L260,320 L40,320 z" fill="#bfdbfe" fill-opacity="0.7" stroke="#2563eb" stroke-width="2.5"/>
+  <!-- area with a border through the query cell -->
+  <path d="M40,50 L290,50 L275,130 L320,185 L300,260 L260,330 L40,330 z" class="area" fill-opacity="0.85" stroke-width="2"/>
+  <text x="110" y="270" font-size="14" font-weight="600" class="t">district A</text>
 
-  <!-- highlighted cell -->
-  <rect x="180" y="40" width="140" height="140" fill="none" stroke="#0f172a" stroke-width="2.5" stroke-dasharray="6 4"/>
-  <text x="250" y="32" text-anchor="middle" font-size="12" fill="#0f172a">query cell</text>
+  <!-- border edges that touch the query cell -->
+  <g stroke-width="5" stroke-linecap="round" class="edge" clip-path="url(#cellclip)">
+    <line x1="290" y1="50" x2="275" y2="130"/>
+    <line x1="275" y1="130" x2="320" y2="185"/>
+  </g>
 
-  <!-- centre and query -->
-  <circle cx="250" cy="110" r="5" fill="#0f172a"/>
-  <text x="236" y="104" text-anchor="end" font-size="12" fill="#0f172a">centre C</text>
-  <circle cx="300" cy="140" r="6" fill="#dc2626"/>
-  <text x="306" y="158" font-size="12" fill="#dc2626">query Q</text>
-  <line x1="250" y1="110" x2="295" y2="137" stroke="#dc2626" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#a)"/>
+  <!-- query cell -->
+  <rect x="180" y="50" width="140" height="140" fill="none" stroke-width="2.5" stroke-dasharray="6 4" class="cell"/>
+  <text x="250" y="40" text-anchor="middle" font-size="13" class="t">query cell</text>
 
-  <!-- legend -->
-  <g font-size="13" fill="#1e293b">
-    <text x="480" y="66" font-weight="600">Stored per cell</text>
-    <text x="480" y="90">• area id</text>
-    <text x="480" y="110">• is C inside? (yes)</text>
-    <text x="480" y="130">• edges touching</text>
-    <text x="492" y="148">the cell (3)</text>
-    <text x="480" y="186" font-weight="600">Lookup</text>
-    <text x="480" y="210">crossings of C→Q</text>
-    <text x="480" y="228">with those edges: 1</text>
-    <text x="480" y="252">odd → flip: Q is</text>
-    <text x="480" y="270" font-weight="600" fill="#dc2626">outside</text>
-    <text x="480" y="300" font-size="12" fill="#475569">Exact integer math.</text>
-    <text x="480" y="316" font-size="12" fill="#475569">No simplified borders.</text>
+  <!-- centre, query, segment -->
+  <circle cx="250" cy="120" r="5" class="t"/>
+  <text x="240" y="114" text-anchor="end" font-size="13" class="t">centre C</text>
+  <line x1="250" y1="120" x2="296" y2="147" stroke-width="2" stroke-dasharray="4 3" class="qs" marker-end="url(#a)"/>
+  <circle cx="302" cy="150" r="6" class="q"/>
+  <text x="334" y="155" font-size="13" class="q">query Q</text>
+
+  <!-- explanation -->
+  <rect x="490" y="50" width="240" height="280" rx="12" class="card"/>
+  <g font-size="14">
+    <text x="510" y="80" font-weight="600" class="t">Stored per cell and area</text>
+    <text x="510" y="106" class="m">• is the centre C inside? yes</text>
+    <text x="510" y="128" class="m">• the border edges inside</text>
+    <text x="524" y="148" class="m">the cell, <tspan font-weight="600" class="edgef">in yellow</tspan></text>
+
+    <text x="510" y="190" font-weight="600" class="t">At lookup</text>
+    <text x="510" y="216" class="m">• count crossings of C → Q</text>
+    <text x="524" y="236" class="m">with those edges: 1</text>
+    <text x="510" y="260" class="m">• odd count flips the answer</text>
+    <text x="510" y="290" font-weight="600" class="q">Q is outside district A</text>
+    <text x="510" y="314" font-size="12" class="m">Integer math, borders never simplified</text>
   </g>
 </svg>

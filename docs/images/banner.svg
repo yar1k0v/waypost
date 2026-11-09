@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>waypost: coordinates in, address out</title>
+  <style>
+    .bg{fill:#ffffff;stroke:#d0d7de}
+    .grid{stroke:#eaeef2}
+    .road{stroke:#d0d7de}
+    .road2{stroke:#afb8c1}
+    .t{fill:#1f2328}
+    .m{fill:#59636e}
+    .acc{fill:#0969da}
+    .card{fill:#f6f8fa;stroke:#d0d7de}
+    .key{fill:#0550ae}
+    .val{fill:#0a3069}
+    .pinhole{fill:#ffffff}
+    .ray{stroke:#0969da}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117;stroke:#30363d}
+      .grid{stroke:#161b22}
+      .road{stroke:#30363d}
+      .road2{stroke:#484f58}
+      .t{fill:#e6edf3}
+      .m{fill:#9198a1}
+      .acc{fill:#4493f8}
+      .card{fill:#161b22;stroke:#30363d}
+      .key{fill:#79c0ff}
+      .val{fill:#a5d6ff}
+      .pinhole{fill:#0d1117}
+      .ray{stroke:#4493f8}
+    }
+  </style>
+  <defs>
+    <pattern id="g" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" class="grid" stroke-width="1"/>
+    </pattern>
+    <clipPath id="map"><rect x="600" y="1" width="599" height="298" rx="0"/></clipPath>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1199" height="299" rx="20" class="bg"/>
+
+  <!-- map side -->
+  <g clip-path="url(#map)">
+    <rect x="600" y="0" width="600" height="300" fill="url(#g)"/>
+    <path d="M600,220 C700,200 760,140 860,150 S1040,230 1200,190" fill="none" class="road2" stroke-width="10" stroke-linecap="round"/>
+    <path d="M720,0 C730,90 780,160 760,300" fill="none" class="road" stroke-width="6"/>
+    <path d="M600,90 C720,100 820,70 1000,40" fill="none" class="road" stroke-width="5"/>
+    <path d="M1010,300 C990,220 1020,120 1110,0" fill="none" class="road" stroke-width="5"/>
+  </g>
+
+  <!-- query point and pin -->
+  <circle cx="690" cy="236" r="6" class="acc"/>
+  <text x="702" y="262" font-size="13" class="m" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">46.9466, 7.4441</text>
+  <path d="M690,236 L790,150" class="ray" stroke-width="2" stroke-dasharray="5 4"/>
+  <g transform="translate(800,140)">
+    <path d="M0,-34 C-17,-34 -26,-21 -26,-9 C-26,9 0,30 0,30 C0,30 26,9 26,-9 C26,-21 17,-34 0,-34 Z" class="acc"/>
+    <circle cx="0" cy="-9" r="9" class="pinhole"/>
+  </g>
+
+  <!-- answer card -->
+  <rect x="860" y="64" width="300" height="164" rx="12" class="card"/>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="14">
+    <text x="884" y="98"><tspan class="key">"street"</tspan><tspan class="m">: </tspan><tspan class="val">"Bundesplatz"</tspan></text>
+    <text x="884" y="124"><tspan class="key">"house_number"</tspan><tspan class="m">: </tspan><tspan class="val">"3"</tspan></text>
+    <text x="884" y="150"><tspan class="key">"locality"</tspan><tspan class="m">: </tspan><tspan class="val">"Bern"</tspan></text>
+    <text x="884" y="176"><tspan class="key">"postcode"</tspan><tspan class="m">: </tspan><tspan class="val">"3011"</tspan></text>
+    <text x="884" y="202"><tspan class="key">"country"</tspan><tspan class="m">: </tspan><tspan class="val">"Switzerland"</tspan></text>
+  </g>
+
+  <!-- wordmark -->
+  <g transform="translate(84,118)">
+    <path d="M0,-34 C-17,-34 -26,-21 -26,-9 C-26,9 0,30 0,30 C0,30 26,9 26,-9 C26,-21 17,-34 0,-34 Z" class="acc"/>
+    <circle cx="0" cy="-9" r="9" class="pinhole"/>
+  </g>
+  <text x="128" y="138" font-size="60" font-weight="700" class="t" letter-spacing="-1">waypost</text>
+  <text x="60" y="194" font-size="22" class="t">Coordinates in. Address out.</text>
+  <text x="60" y="226" font-size="16" class="m">Reverse geocoding and road snapping from OpenStreetMap</text>
+  <text x="60" y="252" font-size="16" class="m">One Rust binary · about 18 µs per lookup · 10,000-point batches</text>
+</svg>
