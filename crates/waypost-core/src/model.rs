@@ -38,6 +38,34 @@ pub mod sec {
     pub const AREA_GRID: &str = "area_grid";
 }
 
+/// Kind of an OSM object, stored as `u8` in records.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsmType {
+    Node = 1,
+    Way = 2,
+    Relation = 3,
+}
+
+impl OsmType {
+    pub fn from_u8(v: u8) -> Option<OsmType> {
+        match v {
+            1 => Some(OsmType::Node),
+            2 => Some(OsmType::Way),
+            3 => Some(OsmType::Relation),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OsmType::Node => "node",
+            OsmType::Way => "way",
+            OsmType::Relation => "relation",
+        }
+    }
+}
+
 /// A UTF-8 string in the `strings` section.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
@@ -189,6 +217,10 @@ pub struct Addr {
     pub place: StrRef,
     pub postcode: StrRef,
     pub city: StrRef,
+    pub osm_id: u64,
+    /// `OsmType`: a node, or a building way.
+    pub osm_type: u8,
+    pub _pad: [u8; 7],
 }
 
 /// An `addr:interpolation` way.
@@ -202,6 +234,8 @@ pub struct Interp {
     /// 1 for all numbers, 2 for odd or even.
     pub step: u32,
     pub street: StrRef,
+    /// The `addr:interpolation` way.
+    pub osm_id: u64,
 }
 
 /// Settlement kind of a `place=*` node or area.
@@ -271,6 +305,8 @@ pub struct Place {
     pub name: NameId,
     pub kind: u8,
     pub _pad: [u8; 3],
+    /// The `place=*` node.
+    pub osm_id: u64,
 }
 
 /// Kind of an area polygon.
@@ -299,6 +335,9 @@ pub struct Area {
     /// Area in square kilometres. The smallest matching area of a field wins.
     pub km2: f64,
     pub osm_id: u64,
+    /// `OsmType`: a closed way or a multipolygon relation.
+    pub osm_type: u8,
+    pub _pad: [u8; 7],
 }
 
 /// One area in one admin grid cell.
@@ -500,10 +539,10 @@ mod tests {
         assert_eq!(size_of::<NameAlt>(), 12);
         assert_eq!(size_of::<Way>(), 24);
         assert_eq!(size_of::<Piece>(), 16);
-        assert_eq!(size_of::<Addr>(), 48);
-        assert_eq!(size_of::<Interp>(), 32);
-        assert_eq!(size_of::<Place>(), 16);
-        assert_eq!(size_of::<Area>(), 32);
+        assert_eq!(size_of::<Addr>(), 64);
+        assert_eq!(size_of::<Interp>(), 40);
+        assert_eq!(size_of::<Place>(), 24);
+        assert_eq!(size_of::<Area>(), 40);
         assert_eq!(size_of::<AreaCell>(), 24);
         assert_eq!(size_of::<GridCell>(), 24);
     }

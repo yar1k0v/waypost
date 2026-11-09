@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub const MAGIC: [u8; 8] = *b"WAYPOST\0";
-pub const FORMAT_VERSION: u32 = 1;
+/// Version 2 added OSM ids to addresses, interpolations, places and areas.
+pub const FORMAT_VERSION: u32 = 2;
 const HEADER_LEN: u64 = 32;
 const ALIGN: u64 = 8;
 
@@ -354,12 +355,12 @@ mod tests {
             assert!(IndexFile::open(&cut).is_err(), "len {n} accepted");
         }
 
-        let mut v2 = full.clone();
-        v2[8..12].copy_from_slice(&2u32.to_le_bytes());
-        std::fs::write(&cut, &v2).unwrap();
+        let mut other = full.clone();
+        other[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        std::fs::write(&cut, &other).unwrap();
         assert!(matches!(
             IndexFile::open(&cut),
-            Err(FormatError::Version { found: 2, .. })
+            Err(FormatError::Version { found, .. }) if found == FORMAT_VERSION + 1
         ));
 
         let mut bad = full;

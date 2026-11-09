@@ -14,7 +14,7 @@ use serde_json::Value;
 use waypost_core::format::{BuildSettings, IndexWriter};
 use waypost_core::geo::{LocalFrame, Point};
 use waypost_core::model::{
-    Area, AreaCell, AreaKind, GridCell, GridSpec, NONE, PlaceKind, StrRef, sec,
+    Area, AreaCell, AreaKind, GridCell, GridSpec, NONE, OsmType, PlaceKind, StrRef, sec,
 };
 use waypost_core::pip::{rings_contain, segment_touches_box};
 
@@ -121,6 +121,11 @@ impl Areas {
             return false;
         };
         let osm_id = props.get("@id").and_then(Value::as_u64).unwrap_or(0);
+        // osmium export names the object the area came from.
+        let osm_type = match props.get("@type").and_then(Value::as_str) {
+            Some("relation") => OsmType::Relation,
+            _ => OsmType::Way,
+        };
         let area_id = self.areas.len() as u32;
         self.areas.push(Area {
             name,
@@ -130,6 +135,8 @@ impl Areas {
             postcode,
             km2,
             osm_id,
+            osm_type: osm_type as u8,
+            _pad: [0; 7],
         });
         self.index_area(area_id, rings);
         true

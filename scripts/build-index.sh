@@ -8,7 +8,9 @@
 #   REBUILD        1 forces a rebuild
 #
 # The build is skipped when INDEX_OUT exists and was built from the same
-# PBF_URLS and WAYPOST_LANGS (recorded in INDEX_OUT.settings).
+# PBF_URLS, WAYPOST_LANGS and waypost-builder binary (recorded in
+# INDEX_OUT.settings). A new builder image always rebuilds, so an index
+# format change never leaves the server with an index it cannot read.
 # Exit code: 0 on success or skip, non-zero on any failure. On failure
 # INDEX_OUT is left as it was.
 #
@@ -20,7 +22,8 @@ langs=${WAYPOST_LANGS:-en}
 out=${INDEX_OUT:-/index/waypost.wpi}
 work=${WORK_DIR:-/work}
 
-settings="urls=$PBF_URLS langs=$langs"
+builder=$(sha256sum "$(command -v waypost-builder)" | cut -d' ' -f1)
+settings="urls=$PBF_URLS langs=$langs builder=$builder"
 if [ -f "$out" ] && [ "${REBUILD:-0}" != 1 ] \
     && [ "$(cat "$out.settings" 2>/dev/null)" = "$settings" ]; then
     echo "index is up to date: $out (set REBUILD=1 to rebuild)"

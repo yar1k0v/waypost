@@ -10,6 +10,6 @@ Rust reverse-geocoding and road-snapping service. README.md has the quick start,
 
 ## Gotchas
 
-1. Record layouts in `crates/waypost-core/src/model.rs` are the file format. Changing one needs `FORMAT_VERSION` bumped in `format.rs` and the size test updated. `tools/wpi.py` mirrors some layouts.
+1. Record layouts in `crates/waypost-core/src/model.rs` are the file format. Changing one needs `FORMAT_VERSION` bumped in `format.rs` and the size test updated. `tools/wpi.py` mirrors some layouts and keeps the old versions too: the accuracy gate reads the base branch's index with the pull request's tools.
 2. CI fails a pull request when any answer field changes on more than 0.5% of 10,000 test points. For an intended change, raise `--max-drop` in `.github/workflows/accuracy.yml`.
 3. Never commit OSM data, test answers or real vehicle positions. Keep them in `data/`.

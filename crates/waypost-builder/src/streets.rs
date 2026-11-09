@@ -9,8 +9,8 @@ use osmpbf::{Element, ElementReader};
 use waypost_core::format::{BuildSettings, IndexWriter};
 use waypost_core::geo::{LocalFrame, Point};
 use waypost_core::model::{
-    Addr, GridBuilder, GridSpec, Interp, NONE, PIECE_MAX_SEGMENTS, Piece, Place, PlaceKind,
-    RoadClass, StrRef, Way, sec,
+    Addr, GridBuilder, GridSpec, Interp, NONE, OsmType, PIECE_MAX_SEGMENTS, Piece, Place,
+    PlaceKind, RoadClass, StrRef, Way, sec,
 };
 
 use crate::Tables;
@@ -130,7 +130,7 @@ impl Streets {
                     street,
                 },
             );
-            self.add_addr(pt, hn, tags, t);
+            self.add_addr(pt, (OsmType::Node, id), hn, tags, t);
         }
         if let Some(kind) = tags.get("place").and_then(PlaceKind::from_tag) {
             let name = name_of(t, |k| tags.get(k).map(str::to_string), None);
@@ -140,12 +140,20 @@ impl Streets {
                     name,
                     kind: kind as u8,
                     _pad: [0; 3],
+                    osm_id: id as u64,
                 });
             }
         }
     }
 
-    fn add_addr(&mut self, pt: Point, hn: &str, tags: &Tags, t: &mut Tables) {
+    fn add_addr(
+        &mut self,
+        pt: Point,
+        (osm_type, osm_id): (OsmType, i64),
+        hn: &str,
+        tags: &Tags,
+        t: &mut Tables,
+    ) {
         let street = tags.get("addr:street");
         let place = tags.get("addr:place");
         // An address needs something to attach the number to.
@@ -159,6 +167,9 @@ impl Streets {
             place: t.strings.add_opt(place),
             postcode: t.strings.add_opt(tags.get("addr:postcode")),
             city: t.strings.add_opt(tags.get("addr:city")),
+            osm_id: osm_id as u64,
+            osm_type: osm_type as u8,
+            _pad: [0; 7],
         });
     }
 
@@ -172,10 +183,10 @@ impl Streets {
         addr_nodes: &HashMap<i64, AddrNode>,
     ) {
         if let Some(hn) = tags.get("addr:housenumber") {
-            self.add_addr(centroid(&pts), hn, tags, t);
+            self.add_addr(centroid(&pts), (OsmType::Way, id), hn, tags, t);
         }
         if let Some(kind) = tags.get("addr:interpolation") {
-            self.interp(kind, tags, &pts, refs, t, addr_nodes);
+            self.interp(id, kind, tags, &pts, refs, t, addr_nodes);
         }
         let Some(class) = tags.get("highway").and_then(RoadClass::from_highway) else {
             return;
@@ -208,8 +219,10 @@ impl Streets {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn interp(
         &mut self,
+        id: i64,
         kind: &str,
         tags: &Tags,
         pts: &[Point],
@@ -256,6 +269,7 @@ impl Streets {
             end,
             step,
             street,
+            osm_id: id as u64,
         });
     }
 

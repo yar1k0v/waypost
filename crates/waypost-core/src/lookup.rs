@@ -62,15 +62,29 @@ pub struct Address<'a> {
     pub country_code: Option<String>,
 }
 
+/// Where an answer comes from: the OSM object that decided the match, and
+/// the OSM data date of the index.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Source<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub osm_type: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub osm_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_date: Option<&'a str>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Answer<'a> {
     #[serde(rename = "match")]
     pub kind: MatchKind,
     /// Metres from the query to the matched feature (house, street or place).
+    /// 0 when an area that contains the point decided the match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance_m: Option<f64>,
     pub address: Address<'a>,
     pub display: String,
+    pub source: Source<'a>,
 }
 
 /// Result of a snap: the nearest point on a road.
@@ -81,6 +95,7 @@ pub struct Snapped<'a> {
     /// Metres from the query point to the snapped point.
     pub distance_m: f64,
     pub road: Road<'a>,
+    pub source: Source<'a>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -492,6 +507,7 @@ impl Index {
                 maxspeed_kmh: (way.maxspeed > 0).then_some(way.maxspeed),
                 osm_way_id: way.osm_id,
             },
+            source: self.source(Some((OsmType::Way, way.osm_id))),
         })
     }
 
@@ -626,6 +642,28 @@ impl Index {
         })
     }
 
+    /// The answer source for an OSM object, or for the index alone.
+    fn source(&self, osm: Option<(OsmType, u64)>) -> Source<'_> {
+        Source {
+            osm_type: osm.map(|(t, _)| t.as_str()),
+            osm_id: osm.map(|(_, id)| id),
+            data_date: self.meta().data_date.as_deref(),
+        }
+    }
+
+    /// The default name and every translation of a name.
+    fn all_names(&self, id: NameId) -> Vec<&str> {
+        let Some(n) = self.v::<NameRec>(&self.s.names).get(id as usize) else {
+            return Vec::new();
+        };
+        let alts = &self.v::<NameAlt>(&self.s.name_alts)
+            [n.alt_off as usize..(n.alt_off + n.alt_n) as usize];
+        std::iter::once(n.default)
+            .chain(alts.iter().map(|a| a.s))
+            .filter_map(|r| self.str(r))
+            .collect()
+    }
+
     pub fn lookup(&self, q: &Query) -> Answer<'_> {
         let radius = if q.radius_m > 0.0 {
             q.radius_m.min(MAX_RADIUS_M)
@@ -646,8 +684,16 @@ impl Index {
                 false
             }
         };
+        // The smallest area that filled a field, and the area that named the locality.
+        let mut finest: Option<(f64, (OsmType, u64))> = None;
+        let mut locality_area: Option<(OsmType, u64)> = None;
         for area in self.areas_at(q.pt) {
             let name = || self.name(area.name, q.lang);
+            let osm = (
+                OsmType::from_u8(area.osm_type).unwrap_or(OsmType::Way),
+                area.osm_id,
+            );
+            let mut used = false;
             if area.kind == AreaKind::Admin as u8 {
                 let slot = match area.level {
                     2 => country,
@@ -657,10 +703,14 @@ impl Index {
                     _ => suburb,
                 };
                 if set(slot, area.km2) {
+                    used = true;
                     match slot {
                         0 => a.state = name(),
                         1 => a.district = name(),
-                        2 => a.locality = name(),
+                        2 => {
+                            a.locality = name();
+                            locality_area = Some(osm);
+                        }
                         3 => a.suburb = name(),
                         _ => {
                             a.country = name();
@@ -673,21 +723,35 @@ impl Index {
                 match PlaceKind::from_u8(area.level) {
                     Some(k) if k.is_locality() => {
                         if set(city, area.km2) {
+                            used = true;
                             a.locality = name();
+                            locality_area = Some(osm);
                         }
                     }
-                    Some(_) if set(suburb, area.km2) => a.suburb = name(),
+                    Some(_) if set(suburb, area.km2) => {
+                        used = true;
+                        a.suburb = name();
+                    }
                     Some(_) => {}
                     None => {}
                 }
             }
             if !area.postcode.is_empty() && set(postcode, area.km2) {
+                used = true;
                 a.postcode = self.str(area.postcode);
             }
+            if used && finest.is_none_or(|(km2, _)| area.km2 < km2) {
+                finest = Some((area.km2, osm));
+            }
         }
+        let finest = finest.map(|(_, osm)| osm);
 
         if q.admin_only {
-            return self.finish(MatchKind::Admin, None, a);
+            let (kind, dist) = match finest {
+                Some(_) => (MatchKind::Admin, Some(0.0)),
+                None => (MatchKind::None, None),
+            };
+            return self.finish(kind, dist, a, self.source(finest));
         }
 
         // The street is the nearest named road: for vehicles, the road they
@@ -710,9 +774,13 @@ impl Index {
             }
             (_, s) => s,
         };
-        let road_default = street.and_then(|(b, _)| self.name(ways[b.id as usize].name, None));
+        // A house is on the road when its `addr:street` equals the road name
+        // in any stored language, for example `name:ru` where `name` is Kazakh.
+        let road_names = street.map_or(Vec::new(), |(b, _)| {
+            self.all_names(ways[b.id as usize].name)
+        });
         let keep = |s: StrRef| match street {
-            Some(_) => road_default.is_some() && self.str(s) == road_default,
+            Some(_) => self.str(s).is_some_and(|hs| road_names.contains(&hs)),
             None => true,
         };
         let addr = self.nearest_addr(&f, radius, keep);
@@ -725,7 +793,7 @@ impl Index {
             (None, Some(it)) => Some((MatchKind::Interpolated, it)),
             (None, None) => None,
         };
-        let (mut house_kind, mut house_dist) = (None, None);
+        let (mut house_kind, mut house_dist, mut house_osm) = (None, None, None);
         let mut house_street = StrRef::EMPTY;
         if let Some((k, h)) = house {
             house_kind = Some(k);
@@ -733,6 +801,10 @@ impl Index {
             match k {
                 MatchKind::Address => {
                     let ad = &addrs[h.id as usize];
+                    house_osm = Some((
+                        OsmType::from_u8(ad.osm_type).unwrap_or(OsmType::Node),
+                        ad.osm_id,
+                    ));
                     a.house_number = self.str(ad.housenumber).map(Cow::Borrowed);
                     house_street = ad.street;
                     if a.postcode.is_none() {
@@ -750,58 +822,66 @@ impl Index {
                 }
                 _ => {
                     let it = &interps[h.id as usize];
+                    house_osm = Some((OsmType::Way, it.osm_id));
                     a.house_number = Some(Cow::Owned(interpolate(it, h.t).to_string()));
                     house_street = it.street;
                 }
             }
         }
 
-        let (kind, dist) = match street {
+        let (mut kind, mut dist, mut osm) = match street {
             Some((b, _)) => {
                 let way = &ways[b.id as usize];
                 a.street = self.name(way.name, q.lang);
                 a.road_class = Some(RoadClass::from_u8(way.class).as_str());
-                (house_kind.unwrap_or(MatchKind::Street), Some(b.dist))
+                match house_kind {
+                    Some(k) => (k, Some(b.dist), house_osm),
+                    None => (
+                        MatchKind::Street,
+                        Some(b.dist),
+                        Some((OsmType::Way, way.osm_id)),
+                    ),
+                }
             }
             None => match house_kind {
                 Some(k) => {
                     a.street = self.str(house_street);
-                    (k, house_dist)
+                    (k, house_dist, house_osm)
                 }
-                None => (MatchKind::Place, None),
+                None => (MatchKind::Place, Some(0.0), locality_area),
             },
         };
 
-        let mut dist = dist;
-        let mut kind = kind;
         if a.locality.is_none()
             && let Some((d, p)) = self.place_near(&f, PlaceKind::is_locality)
         {
-            {
-                a.locality = self.name(p.name, q.lang);
-                if kind == MatchKind::Place {
-                    dist = Some(d);
-                }
+            a.locality = self.name(p.name, q.lang);
+            if kind == MatchKind::Place {
+                dist = Some(d);
+                osm = Some((OsmType::Node, p.osm_id));
             }
         }
         if a.suburb.is_none()
             && let Some((_, p)) = self.place_near(&f, |k| !k.is_locality())
         {
-            {
-                a.suburb = self.name(p.name, q.lang);
-            }
+            a.suburb = self.name(p.name, q.lang);
         }
         if kind == MatchKind::Place && a.locality.is_none() {
-            kind = if a.country.is_some() {
-                MatchKind::Admin
-            } else {
-                MatchKind::None
+            (kind, dist, osm) = match finest {
+                Some(_) if a.country.is_some() => (MatchKind::Admin, Some(0.0), finest),
+                _ => (MatchKind::None, None, None),
             };
         }
-        self.finish(kind, dist, a)
+        self.finish(kind, dist, a, self.source(osm))
     }
 
-    fn finish<'a>(&'a self, kind: MatchKind, dist: Option<f64>, a: Address<'a>) -> Answer<'a> {
+    fn finish<'a>(
+        &'a self,
+        kind: MatchKind,
+        dist: Option<f64>,
+        a: Address<'a>,
+        source: Source<'a>,
+    ) -> Answer<'a> {
         let mut parts: Vec<String> = Vec::new();
         match (&a.street, &a.house_number) {
             (Some(s), Some(h)) => parts.push(format!("{s} {h}")),
@@ -824,6 +904,7 @@ impl Index {
             distance_m: dist.map(|d| (d * 10.0).round() / 10.0),
             display: parts.join(", "),
             address: a,
+            source,
         }
     }
 
@@ -866,6 +947,7 @@ mod tests {
             end,
             step,
             street: StrRef::EMPTY,
+            osm_id: 0,
         }
     }
 
@@ -878,5 +960,250 @@ mod tests {
         assert_eq!(interpolate(&it(1, 9, 2), 0.3), 3);
         assert_eq!(interpolate(&it(9, 1, 2), 0.3), 7);
         assert_eq!(interpolate(&it(1, 10, 1), 0.5), 6);
+    }
+
+    use crate::format::{BuildSettings, IndexWriter};
+
+    /// Metres to 1e-7 degree units of latitude.
+    const M: i32 = 90;
+
+    /// A small world near 43N 76E: one road along the parallel, houses on
+    /// it and on another street, a place node, and a country and a city
+    /// area that cover the whole test grid cell.
+    fn world(dir: &Path) -> Index {
+        let (lat0, lon0) = (deg(43.0), deg(76.0));
+        let at = |north_m: i32, east: i32| Point {
+            lat: lat0 + north_m * M,
+            lon: lon0 + east,
+        };
+        let mut strings = StringTable::default();
+        let mut names = NameTable::default();
+        // langs: 0 = en, 1 = ru. The road's `name` is Kazakh; houses use the Russian name.
+        let road = names.add(
+            strings.add("Абай көшесі"),
+            &[(1, strings.add("улица Абая"))],
+        );
+        let country = names.add(strings.add("Қазақстан"), &[(0, strings.add("Kazakhstan"))]);
+        let city = names.add(strings.add("Алматы"), &[(0, strings.add("Almaty"))]);
+        let village = names.add(strings.add("Ауыл"), &[]);
+
+        let nodes = vec![at(0, 0), at(0, 20_000)];
+        let ways = [Way {
+            name: road,
+            class: RoadClass::Residential as u8,
+            _pad: [0; 3],
+            maxspeed: 60,
+            _pad2: [0; 6],
+            osm_id: 500,
+        }];
+        let pieces = [Piece {
+            node_off: 0,
+            way: 0,
+            n: 2,
+        }];
+        let mut addr = |pt, hn: &str, street: &str, id| Addr {
+            pt,
+            housenumber: strings.add(hn),
+            street: strings.add(street),
+            place: StrRef::EMPTY,
+            postcode: StrRef::EMPTY,
+            city: StrRef::EMPTY,
+            osm_id: id,
+            osm_type: OsmType::Node as u8,
+            _pad: [0; 7],
+        };
+        let addrs = [
+            addr(at(15, 10_000), "10", "улица Абая", 1001),
+            addr(at(-4, 15_000), "5", "Other", 1002),
+        ];
+        let places = [Place {
+            pt: at(2_000, 0),
+            name: village,
+            kind: PlaceKind::Village as u8,
+            _pad: [0; 3],
+            osm_id: 700,
+        }];
+        let area = |name, level, cc: &[u8; 2], km2, id| Area {
+            name,
+            kind: AreaKind::Admin as u8,
+            level,
+            country: *cc,
+            postcode: StrRef::EMPTY,
+            km2,
+            osm_id: id,
+            osm_type: OsmType::Relation as u8,
+            _pad: [0; 7],
+        };
+        let areas = [
+            area(country, 2, b"KZ", 2.7e6, 1),
+            area(city, 8, &[0, 0], 680.0, 2),
+        ];
+
+        let settings = BuildSettings {
+            street_cell: 50_000,
+            // One admin cell covers the whole test area.
+            admin_cell: 100_000_000,
+            langs: vec!["en".into(), "ru".into()],
+        };
+        let sg = GridSpec {
+            size: settings.street_cell,
+        };
+        let ag = GridSpec {
+            size: settings.admin_cell,
+        };
+        let mut g = GridBuilder::default();
+        for (r, c) in sg.cells_in_box(nodes[0], nodes[1]) {
+            g.insert(GridSpec::key(r, c), 0);
+        }
+        let (piece_grid, piece_ids) = g.finish();
+        let mut g = GridBuilder::default();
+        for (i, a) in addrs.iter().enumerate() {
+            g.insert(sg.key_of(a.pt), i as u32);
+        }
+        let (addr_grid, addr_ids) = g.finish();
+        let mut g = GridBuilder::default();
+        g.insert(ag.key_of(places[0].pt), 0);
+        let (place_grid, place_ids) = g.finish();
+        let cell = |area| AreaCell {
+            area,
+            center_inside: 1,
+            edge_off: 0,
+            edge_n: 0,
+            _pad: 0,
+        };
+        let area_cells = [cell(0), cell(1)];
+        let area_grid = [GridCell {
+            key: ag.key_of(at(0, 0)),
+            off: 0,
+            n: 2,
+            _pad: 0,
+        }];
+
+        let path = dir.join("w.wpi");
+        let mut w = IndexWriter::create(&path).unwrap();
+        w.add(sec::NODES, &nodes).unwrap();
+        w.add(sec::WAYS, &ways).unwrap();
+        w.add(sec::PIECES, &pieces).unwrap();
+        w.add(sec::PIECE_GRID, &piece_grid).unwrap();
+        w.add(sec::PIECE_IDS, &piece_ids).unwrap();
+        w.add(sec::ADDRS, &addrs).unwrap();
+        w.add(sec::ADDR_GRID, &addr_grid).unwrap();
+        w.add(sec::ADDR_IDS, &addr_ids).unwrap();
+        w.add::<Interp>(sec::INTERPS, &[]).unwrap();
+        w.add::<GridCell>(sec::INTERP_GRID, &[]).unwrap();
+        w.add::<u32>(sec::INTERP_IDS, &[]).unwrap();
+        w.add(sec::PLACES, &places).unwrap();
+        w.add(sec::PLACE_GRID, &place_grid).unwrap();
+        w.add(sec::PLACE_IDS, &place_ids).unwrap();
+        w.add(sec::AREAS, &areas).unwrap();
+        w.add::<Point>(sec::AREA_POINTS, &[]).unwrap();
+        w.add::<u64>(sec::AREA_EDGES, &[]).unwrap();
+        w.add(sec::AREA_CELLS, &area_cells).unwrap();
+        w.add(sec::AREA_GRID, &area_grid).unwrap();
+        w.add(sec::NAMES, &names.names).unwrap();
+        w.add(sec::NAME_ALTS, &names.alts).unwrap();
+        w.add_bytes(sec::STRINGS, &strings.into_bytes()).unwrap();
+        w.finish(Meta {
+            data_date: Some("2026-11-08T21:21:00Z".into()),
+            settings,
+            ..Default::default()
+        })
+        .unwrap();
+        Index::open(&path).unwrap()
+    }
+
+    fn query(idx: &Index, north_m: i32, east: i32) -> Query {
+        Query {
+            pt: Point {
+                lat: deg(43.0) + north_m * M,
+                lon: deg(76.0) + east,
+            },
+            radius_m: DEFAULT_RADIUS_M,
+            lang: idx.lang_index("en"),
+            admin_only: false,
+            street_rule: StreetRule::Hybrid,
+        }
+    }
+
+    #[test]
+    fn house_on_road_matches_by_translated_street_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        // 5 m from the road, 10 m from house 10: the road names the street,
+        // and house 10 is on it under its Russian name.
+        let a = idx.lookup(&query(&idx, 5, 10_000));
+        assert_eq!(a.kind, MatchKind::Address);
+        assert_eq!(a.address.street, Some("Абай көшесі"));
+        assert_eq!(a.address.house_number.as_deref(), Some("10"));
+        assert_eq!(a.address.locality, Some("Almaty"));
+        assert_eq!(a.address.country, Some("Kazakhstan"));
+        assert_eq!(a.address.country_code.as_deref(), Some("KZ"));
+        assert_eq!(
+            a.source,
+            Source {
+                osm_type: Some("node"),
+                osm_id: Some(1001),
+                data_date: Some("2026-11-08T21:21:00Z"),
+            }
+        );
+    }
+
+    #[test]
+    fn street_rule_decides_between_road_and_closer_house() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        // 1 m from house 5 on another street, 3 m from the road.
+        let mut q = query(&idx, -3, 15_000);
+        let a = idx.lookup(&q);
+        assert_eq!(a.kind, MatchKind::Address);
+        assert_eq!(a.address.street, Some("Other"));
+        assert_eq!(a.address.house_number.as_deref(), Some("5"));
+
+        q.street_rule = StreetRule::Road;
+        let a = idx.lookup(&q);
+        assert_eq!(a.address.street, Some("Абай көшесі"));
+        assert_eq!(a.address.house_number.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn far_from_roads_falls_back_to_area_with_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        let a = idx.lookup(&query(&idx, 1_500, 0));
+        assert_eq!(a.kind, MatchKind::Place);
+        assert_eq!(a.distance_m, Some(0.0));
+        assert_eq!(a.address.street, None);
+        assert_eq!(a.address.locality, Some("Almaty"));
+        assert_eq!(a.address.suburb, None);
+        assert_eq!(a.source.osm_type, Some("relation"));
+        assert_eq!(a.source.osm_id, Some(2));
+    }
+
+    #[test]
+    fn admin_only_skips_streets() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        let mut q = query(&idx, 5, 10_000);
+        q.admin_only = true;
+        q.lang = None;
+        let a = idx.lookup(&q);
+        assert_eq!(a.kind, MatchKind::Admin);
+        assert_eq!(a.address.street, None);
+        assert_eq!(a.address.locality, Some("Алматы"));
+        assert_eq!(a.source.osm_id, Some(2));
+        assert_eq!(a.display, "Алматы, Қазақстан");
+    }
+
+    #[test]
+    fn snap_reports_road_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        let q = query(&idx, 20, 5_000);
+        let s = idx.snap(q.pt, 50.0, q.lang, true).unwrap();
+        assert!((s.distance_m - 20.0).abs() < 0.5, "{}", s.distance_m);
+        assert_eq!(s.road.maxspeed_kmh, Some(60));
+        assert_eq!(s.source.osm_type, Some("way"));
+        assert_eq!(s.source.osm_id, Some(500));
+        assert!(idx.snap(q.pt, 10.0, None, true).is_none());
     }
 }
