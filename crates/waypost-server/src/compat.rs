@@ -17,7 +17,9 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use waypost_core::lookup::{self, Address, Index};
 
-use crate::{AppState, St, bad, index, lang, point, query, radius, street_rule, timed};
+use crate::{
+    AppState, St, bad, house_match, index, lang, point, query, radius, street_rule, timed,
+};
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -28,6 +30,7 @@ pub struct Params {
     key: Option<String>,
     lang: Option<String>,
     street: Option<String>,
+    house: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -164,6 +167,7 @@ fn parse(
         lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
         admin_only: false,
         street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
+        house_match: house_match(p.house.as_deref()).map_err(bad)?,
     };
     Ok((idx, q))
 }

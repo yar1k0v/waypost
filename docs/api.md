@@ -12,6 +12,7 @@ HTTP/JSON on port 8080. Examples come from a Switzerland index (OSM data of 2026
 | `radius` | no | 100 | Search radius for houses and streets, metres, max 1000 |
 | `lang` | no | | Language code from `/v1/info`; falls back to `name` |
 | `street` | no | `hybrid` | `hybrid` or `road`, see [architecture](architecture.md#lookup) |
+| `house` | no | `exact` | `exact` or `nearest`. A house is on the road when its `addr:street` equals the road name in a stored language. `nearest` also ignores letter case and spaces (`Улица Абая` is on `улица Абая`) and adds `house_distance_m` |
 | `admin_only` | no | false | Return admin areas only |
 
 ```sh
@@ -30,6 +31,7 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 |---|---|
 | `match` | `address`, `interpolated`, `street`, `place` (settlement only), `admin` (areas only), `none` |
 | `distance_m` | Metres to the matched road, house or settlement. 0 when an area that contains the point decided the match. Absent for `none` |
+| `house_distance_m` | Metres to the house that gave `house_number`. Only with `house=nearest`; absent when no house matched |
 | `address.*` | `house_number`, `street`, `road_class`, `suburb`, `locality`, `district`, `state`, `postcode`, `country`, `country_code`; absent fields are omitted |
 | `display` | One-line address |
 | `source` | `osm_type` (`node`, `way`, `relation`) and `osm_id` of the object that decided `match`, plus `data_date` of the index's OSM data. `osm_*` absent for `none` |
@@ -38,7 +40,7 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 
 ```json
 {"points":[{"lat":46.2044,"lon":6.1432,"id":"veh-1"},{"lat":46.9466,"lon":7.4441}],
- "radius":75, "lang":"de", "street":"hybrid", "admin_only":false}
+ "radius":75, "lang":"de", "street":"hybrid", "house":"exact", "admin_only":false}
 ```
 
 - At most 10,000 points; body at most 2 MB.
@@ -85,7 +87,7 @@ For clients written against the older geocoder contract. They answer in that con
 
 | Route | Parameters | Response |
 |---|---|---|
-| `GET /reverse` | `lat`, `lon`, `distance` (metres), `key` (ignored), plus `lang`, `street` | `{"display_name", "address":{house_number, road, suburb, city, state, county, postcode, country, country_code}}` |
+| `GET /reverse` | `lat`, `lon`, `distance` (metres), `key` (ignored), plus `lang`, `street`, `house` (no `house_distance_m` in the response) | `{"display_name", "address":{house_number, road, suburb, city, state, county, postcode, country, country_code}}` |
 | `GET /snap` | `lat`, `lon`, `distance` | `{"lat","lon","distance"}`, 404 when no road is near |
 
 - Nothing near (including 0,0): `/reverse` answers 200 `{"address":{}}`.

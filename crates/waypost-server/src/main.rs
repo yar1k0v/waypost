@@ -134,6 +134,14 @@ fn lang(idx: &Index, code: Option<&str>) -> Result<Option<u32>, String> {
     }
 }
 
+fn house_match(v: Option<&str>) -> Result<lookup::HouseMatch, String> {
+    match v {
+        None | Some("") => Ok(lookup::HouseMatch::default()),
+        Some(v) => lookup::HouseMatch::parse(v)
+            .ok_or_else(|| format!("house must be exact or nearest, not {v}")),
+    }
+}
+
 fn street_rule(v: Option<&str>) -> Result<lookup::StreetRule, String> {
     match v {
         None | Some("") => Ok(lookup::StreetRule::default()),
@@ -194,6 +202,7 @@ pub struct ReverseParams {
     #[serde(default)]
     admin_only: bool,
     street: Option<String>,
+    house: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -226,6 +235,7 @@ pub struct BatchRequest {
     #[serde(default)]
     admin_only: bool,
     street: Option<String>,
+    house: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -352,6 +362,7 @@ async fn reverse(State(st): St, q: Result<Query<ReverseParams>, QueryRejection>)
             lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
             admin_only: p.admin_only,
             street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
+            house_match: house_match(p.house.as_deref()).map_err(bad)?,
         };
         Ok(Json(timed(&st.metrics, || idx.lookup(&q))).into_response())
     };
@@ -371,6 +382,7 @@ async fn batch(State(st): St, b: Result<Json<BatchRequest>, JsonRejection>) -> R
             lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
             admin_only: req.admin_only,
             street_rule: street_rule(req.street.as_deref()).map_err(bad)?,
+            house_match: house_match(req.house.as_deref()).map_err(bad)?,
         };
         Ok((req.points, ReverseOp(q)))
     };

@@ -7,7 +7,7 @@ use std::io::BufRead;
 use std::time::Instant;
 
 use waypost_core::geo::Point;
-use waypost_core::lookup::{DEFAULT_RADIUS_M, Index, Query, StreetRule};
+use waypost_core::lookup::{DEFAULT_RADIUS_M, HouseMatch, Index, Query, StreetRule};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lang: None,
         admin_only: false,
         street_rule: StreetRule::Hybrid,
+        house_match: HouseMatch::Exact,
     };
     // One pass to warm caches, one measured pass.
     for &pt in &pts {

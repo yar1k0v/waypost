@@ -82,6 +82,10 @@ pub struct Answer<'a> {
     /// 0 when an area that contains the point decided the match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance_m: Option<f64>,
+    /// Metres from the query to the house that gave the number, under
+    /// `HouseMatch::Nearest` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub house_distance_m: Option<f64>,
     pub address: Address<'a>,
     pub display: String,
     pub source: Source<'a>,
@@ -164,6 +168,28 @@ pub struct Query {
     /// Admin areas only: skip houses, streets and places.
     pub admin_only: bool,
     pub street_rule: StreetRule,
+    pub house_match: HouseMatch,
+}
+
+/// How a house is tied to the road that names the street.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HouseMatch {
+    /// `addr:street` equals the road name in a stored language, byte for byte.
+    #[default]
+    Exact,
+    /// Same, but ignoring letter case and surrounding spaces, so
+    /// `Улица Абая` is on `улица Абая`. The answer reports `house_distance_m`.
+    Nearest,
+}
+
+impl HouseMatch {
+    pub fn parse(v: &str) -> Option<HouseMatch> {
+        match v {
+            "exact" => Some(HouseMatch::Exact),
+            "nearest" => Some(HouseMatch::Nearest),
+            _ => None,
+        }
+    }
 }
 
 /// Which street a lookup names when a road and a house disagree.
@@ -843,7 +869,17 @@ impl Index {
         let road_names = street.map_or(Vec::new(), |(b, _)| {
             self.all_names(ways[b.id as usize].name)
         });
+        let nearest = q.house_match == HouseMatch::Nearest;
+        let fold = |s: &str| s.trim().to_lowercase();
+        let road_folded: Vec<String> = if nearest {
+            road_names.iter().map(|n| fold(n)).collect()
+        } else {
+            Vec::new()
+        };
         let keep = |s: StrRef| match street {
+            Some(_) if nearest => self
+                .str(s)
+                .is_some_and(|hs| road_folded.contains(&fold(hs))),
             Some(_) => self.str(s).is_some_and(|hs| road_names.contains(&hs)),
             None => true,
         };
@@ -936,7 +972,11 @@ impl Index {
                 _ => (MatchKind::None, None, None),
             };
         }
-        self.finish(kind, dist, a, self.source(osm))
+        let mut answer = self.finish(kind, dist, a, self.source(osm));
+        if nearest {
+            answer.house_distance_m = house_dist.map(|d| (d * 10.0).round() / 10.0);
+        }
+        answer
     }
 
     fn finish<'a>(
@@ -967,6 +1007,7 @@ impl Index {
             kind,
             distance_m: dist.map(|d| (d * 10.0).round() / 10.0),
             display: parts.join(", "),
+            house_distance_m: None,
             address: a,
             source,
         }
@@ -1090,6 +1131,7 @@ mod tests {
         let addrs = [
             addr(at(15, 10_000), "10", "улица Абая", 1001),
             addr(at(-4, 15_000), "5", "Other", 1002),
+            addr(at(20, 20_000), "12", "Улица Абая", 1003),
         ];
         let places = [Place {
             pt: at(2_000, 0),
@@ -1208,6 +1250,7 @@ mod tests {
             lang: idx.lang_index("en"),
             admin_only: false,
             street_rule: StreetRule::Hybrid,
+            house_match: HouseMatch::Exact,
         }
     }
 
@@ -1232,6 +1275,29 @@ mod tests {
                 data_date: Some("2026-11-08T21:21:00Z"),
             }
         );
+    }
+
+    #[test]
+    fn nearest_house_ignores_case_of_the_street_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        // House 12 is `Улица Абая` and the road is `улица Абая`: the exact rule
+        // skips it and takes house 10, 65 m away. `Nearest` takes house 12.
+        let q = query(&idx, 5, 18_000);
+        let exact = idx.lookup(&q);
+        assert_eq!(exact.address.house_number.as_deref(), Some("10"));
+        assert_eq!(exact.house_distance_m, None);
+        let near = idx.lookup(&Query {
+            house_match: HouseMatch::Nearest,
+            ..q
+        });
+        assert_eq!(near.address.street, Some("Абай көшесі"));
+        assert_eq!(near.address.house_number.as_deref(), Some("12"));
+        assert_eq!(near.source.osm_id, Some(1003));
+        let d = near.house_distance_m.unwrap();
+        assert!(d > 10.0 && d < 40.0, "{d}");
+        // The street distance is the road's, not the house's.
+        assert_eq!(near.distance_m, exact.distance_m);
     }
 
     #[test]
