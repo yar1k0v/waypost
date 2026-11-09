@@ -31,7 +31,7 @@ RUN apt-get update \
  && useradd --uid 10001 --create-home waypost \
  && mkdir /index && chown 10001 /index
 COPY --from=build /out/waypost-builder /usr/local/bin/waypost-builder
-COPY scripts/prep.sh scripts/build-index.sh /usr/local/bin/
+COPY --chmod=0755 scripts/prep.sh scripts/build-index.sh /usr/local/bin/
 USER 10001
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/build-index.sh"]
