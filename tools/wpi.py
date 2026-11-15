@@ -1,4 +1,4 @@
-"""Minimal reader for waypost index files (format v1 and v2), for tools only.
+"""Minimal reader for waypost index files (format v1, v2 and v3), for tools only.
 
 Record layouts mirror crates/waypost-core/src/model.rs. The accuracy gate
 reads the base branch's index with the head branch's tools, so keep the
@@ -17,6 +17,12 @@ RECORDS = {
         "places": ("<iiIB3x", 16),
     },
     2: {
+        "pieces": ("<QII", 16),
+        "nodes": ("<ii", 8),
+        "addrs": ("<ii10IQB7x", 64),
+        "places": ("<iiIB3xQ", 24),
+    },
+    3: {
         "pieces": ("<QII", 16),
         "nodes": ("<ii", 8),
         "addrs": ("<ii10IQB7x", 64),

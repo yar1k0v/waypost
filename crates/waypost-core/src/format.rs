@@ -25,7 +25,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub const MAGIC: [u8; 8] = *b"WAYPOST\0";
 /// Version 2 added OSM ids to addresses, interpolations, places and areas.
-pub const FORMAT_VERSION: u32 = 2;
+/// Version 3 added the one-way field to ways.
+pub const FORMAT_VERSION: u32 = 3;
 const HEADER_LEN: u64 = 32;
 const ALIGN: u64 = 8;
 
@@ -170,6 +171,10 @@ impl IndexWriter {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&self.tmp, &self.path)?;
+        // Best effort: make the rename itself durable.
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+        }
         Ok(self.path)
     }
 }

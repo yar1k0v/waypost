@@ -43,6 +43,8 @@ pub fn name_of(
 }
 
 /// Parses `maxspeed` into km/h. Returns 0 when absent or not a plain number.
+/// Takes the first value of a `;` or `|` list and understands `mph`, `knots`
+/// and `zone:code` values such as `DE:urban`.
 pub fn maxspeed_kmh(v: Option<&str>) -> u16 {
     let Some(v) = v else { return 0 };
     let v = v.trim();
@@ -52,10 +54,37 @@ pub fn maxspeed_kmh(v: Option<&str>) -> u16 {
             .parse::<f64>()
             .map_or(0, |x| (x * 1.609_344).round() as u16);
     }
-    v.trim_end_matches("km/h")
+    if let Some(kn) = v.strip_suffix("knots") {
+        return kn
+            .trim()
+            .parse::<f64>()
+            .map_or(0, |x| (x * 1.852).round() as u16);
+    }
+    let first = v.split([';', '|']).next().unwrap_or(v).trim();
+    if let Some((_, zone)) = first.split_once(':') {
+        return match zone {
+            "urban" => 50,
+            "rural" => 100,
+            "motorway" => 130,
+            "living_street" => 10,
+            _ => 0,
+        };
+    }
+    first
+        .trim_end_matches("km/h")
         .trim()
         .parse::<u16>()
         .unwrap_or(0)
+}
+
+/// Maps the OSM `oneway` tag: 0 = both directions, 1 = forward only,
+/// 2 = backward only.
+pub fn oneway(v: Option<&str>) -> u8 {
+    match v {
+        Some("yes" | "true" | "1") => 1,
+        Some("-1" | "reverse") => 2,
+        _ => 0,
+    }
 }
 
 /// First integer in a house number, for interpolation endpoints ("12a" -> 12).
@@ -76,8 +105,21 @@ mod tests {
     fn maxspeed() {
         assert_eq!(maxspeed_kmh(Some("60")), 60);
         assert_eq!(maxspeed_kmh(Some("30 mph")), 48);
-        assert_eq!(maxspeed_kmh(Some("DE:urban")), 0);
+        assert_eq!(maxspeed_kmh(Some("30 knots")), 56);
+        assert_eq!(maxspeed_kmh(Some("50;70")), 50);
+        assert_eq!(maxspeed_kmh(Some("DE:urban")), 50);
         assert_eq!(maxspeed_kmh(None), 0);
+    }
+
+    #[test]
+    fn oneway_values() {
+        assert_eq!(oneway(Some("yes")), 1);
+        assert_eq!(oneway(Some("true")), 1);
+        assert_eq!(oneway(Some("1")), 1);
+        assert_eq!(oneway(Some("-1")), 2);
+        assert_eq!(oneway(Some("reverse")), 2);
+        assert_eq!(oneway(Some("no")), 0);
+        assert_eq!(oneway(None), 0);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::Path;
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use crate::format::{FormatError, IndexFile, Meta};
-use crate::geo::{LocalFrame, Point, Projection, SCALE};
+use crate::geo::{LocalFrame, Point, Projection, SCALE, UNITS_PER_HALF_TURN};
 use crate::model::*;
 use crate::pip::crosses;
 
@@ -59,7 +59,7 @@ pub struct Address<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
+    pub country_code: Option<&'a str>,
 }
 
 /// Where an answer comes from: the OSM object that decided the match, and
@@ -107,9 +107,14 @@ pub struct Heading {
 
 impl Heading {
     /// The direction of travel along a segment with direction `seg_deg`, or
-    /// `None` when neither direction is within the tolerance. Both
-    /// directions count, because one-way roads are not stored.
+    /// `None` when neither direction is within the tolerance.
     pub fn along(&self, seg_deg: f64) -> Option<f64> {
+        self.along_dir(seg_deg).map(|(d, _)| d)
+    }
+
+    /// Like `along`, but also reports whether the segment's own direction
+    /// matched (`true`) or its reverse (`false`). One-way legality needs this.
+    pub fn along_dir(&self, seg_deg: f64) -> Option<(f64, bool)> {
         let diff = |d: f64| {
             let x = (d - self.bearing_deg).rem_euclid(360.0);
             x.min(360.0 - x)
@@ -117,9 +122,9 @@ impl Heading {
         let rev = (seg_deg + 180.0).rem_euclid(360.0);
         let (fwd_diff, rev_diff) = (diff(seg_deg), diff(rev));
         if fwd_diff <= self.tol_deg && fwd_diff <= rev_diff {
-            Some(seg_deg)
+            Some((seg_deg, true))
         } else if rev_diff <= self.tol_deg {
-            Some(rev)
+            Some((rev, false))
         } else {
             None
         }
@@ -299,7 +304,11 @@ impl Index {
         let n_alts = self.view::<NameAlt>("name_alts", &self.s.name_alts)?.len();
         let name_ok = |n: NameId| n == NONE || (n as usize) < n_names;
         for n in self.view::<NameRec>("names", &self.s.names)? {
-            if !str_ok(n.default) || n.alt_off as usize + n.alt_n as usize > n_alts {
+            if !str_ok(n.default)
+                || (n.alt_off as usize)
+                    .checked_add(n.alt_n as usize)
+                    .is_none_or(|s| s > n_alts)
+            {
                 return Err(bad("name"));
             }
         }
@@ -316,7 +325,12 @@ impl Index {
             }
         }
         for p in self.view::<Piece>("pieces", &self.s.pieces)? {
-            if p.n < 2 || p.node_off + p.n as u64 > n_nodes || p.way as usize >= n_ways {
+            if p.n < 2
+                || p.node_off
+                    .checked_add(p.n as u64)
+                    .is_none_or(|s| s > n_nodes)
+                || p.way as usize >= n_ways
+            {
                 return Err(bad("piece"));
             }
         }
@@ -329,7 +343,12 @@ impl Index {
             }
         }
         for i in self.view::<Interp>("interps", &self.s.interps)? {
-            if i.n < 2 || i.node_off + i.n as u64 > n_nodes || !str_ok(i.street) {
+            if i.n < 2
+                || i.node_off
+                    .checked_add(i.n as u64)
+                    .is_none_or(|s| s > n_nodes)
+                || !str_ok(i.street)
+            {
                 return Err(bad("interpolation"));
             }
         }
@@ -348,12 +367,19 @@ impl Index {
             }
         }
         let edges = self.view::<u64>("area_edges", &self.s.area_edges)?;
-        if edges.iter().any(|&e| e + 1 >= n_area_pts) {
+        if edges
+            .iter()
+            .any(|&e| e.checked_add(1).is_none_or(|x| x >= n_area_pts))
+        {
             return Err(bad("area edge"));
         }
         let cells = self.view::<AreaCell>("area_cells", &self.s.area_cells)?;
         for c in cells {
-            if c.area as usize >= n_areas || c.edge_off + c.edge_n as u64 > edges.len() as u64 {
+            if c.area as usize >= n_areas
+                || c.edge_off
+                    .checked_add(c.edge_n as u64)
+                    .is_none_or(|s| s > edges.len() as u64)
+            {
                 return Err(bad("area cell"));
             }
         }
@@ -404,7 +430,11 @@ impl Index {
                 }
                 None => n_targets,
             };
-            if g.iter().any(|c| c.off + c.n as u64 > n_ids as u64) {
+            if g.iter().any(|c| {
+                c.off
+                    .checked_add(c.n as u64)
+                    .is_none_or(|s| s > n_ids as u64)
+            }) {
                 return Err(bad(name));
             }
         }
@@ -481,11 +511,14 @@ impl Index {
         );
         let cells: &[GridCell] = self.v(cells);
         let ids: &[u32] = self.v(ids);
+        let dlon = f.lon_half_span(radius_m);
         // Near the antimeridian the box wraps; split columns in that case.
-        let col_ranges: Vec<(u32, u32)> = if sw.lon <= ne.lon {
+        let col_ranges: Vec<(u32, u32)> = if dlon >= UNITS_PER_HALF_TURN {
+            vec![(0, grid.cols() - 1)]
+        } else if sw.lon <= ne.lon {
             vec![(grid.col(sw.lon), grid.col(ne.lon))]
         } else {
-            vec![(grid.col(sw.lon), grid.cols()), (0, grid.col(ne.lon))]
+            vec![(grid.col(sw.lon), grid.cols() - 1), (0, grid.col(ne.lon))]
         };
         let (r0, r1) = (grid.row(sw.lat), grid.row(ne.lat));
         (r0..=r1)
@@ -537,8 +570,14 @@ impl Index {
                 let seg = segment_bearing(f, w[0], w[1]);
                 let dir = match (heading, seg) {
                     (None, s) => s.unwrap_or(0.0),
-                    (Some(h), Some(s)) => match h.along(s) {
-                        Some(d) => d,
+                    (Some(h), Some(s)) => match h.along_dir(s) {
+                        Some((d, fwd)) => {
+                            let ow = ways[p.way as usize].oneway;
+                            if (ow == 1 && !fwd) || (ow == 2 && fwd) {
+                                continue;
+                            }
+                            d
+                        }
                         None => continue,
                     },
                     (Some(_), None) => continue,
@@ -560,7 +599,8 @@ impl Index {
     /// The nearest point on a road within `radius_m` (clamped to
     /// `MAX_RADIUS_M`), or `None` when there is no road that close. With
     /// `vehicle_only`, pedestrian ways are skipped. With a heading, only road
-    /// segments that run that way (in either direction) count.
+    /// segments that run that way count, and a one-way road only in its legal
+    /// direction.
     pub fn snap(
         &self,
         pt: Point,
@@ -802,8 +842,9 @@ impl Index {
                         3 => a.suburb = name(),
                         _ => {
                             a.country = name();
-                            a.country_code = (area.country != [0, 0])
-                                .then(|| String::from_utf8_lossy(&area.country).into_owned());
+                            if area.country != [0, 0] {
+                                a.country_code = std::str::from_utf8(&area.country).ok();
+                            }
                         }
                     }
                 }
@@ -907,8 +948,8 @@ impl Index {
                     ));
                     a.house_number = self.str(ad.housenumber).map(Cow::Borrowed);
                     house_street = ad.street;
-                    if a.postcode.is_none() {
-                        a.postcode = self.str(ad.postcode);
+                    if let Some(pc) = self.str(ad.postcode) {
+                        a.postcode = Some(pc);
                     }
                     if street.is_none() && ad.street.is_empty() {
                         // addr:place addresses name the settlement instead.
@@ -999,7 +1040,7 @@ impl Index {
         .into_iter()
         .flatten()
         {
-            if parts.last().map(String::as_str) != Some(p) {
+            if !parts.iter().any(|x| x == p) {
                 parts.push(p.to_string());
             }
         }
@@ -1101,7 +1142,8 @@ mod tests {
             class: RoadClass::Residential as u8,
             _pad: [0; 3],
             maxspeed,
-            _pad2: [0; 6],
+            oneway: 0,
+            _pad2: [0; 5],
             osm_id,
         };
         let ways = [way(road, 60, 500), way(cross, 0, 501)];
@@ -1266,7 +1308,7 @@ mod tests {
         assert_eq!(a.address.house_number.as_deref(), Some("10"));
         assert_eq!(a.address.locality, Some("Almaty"));
         assert_eq!(a.address.country, Some("Kazakhstan"));
-        assert_eq!(a.address.country_code.as_deref(), Some("KZ"));
+        assert_eq!(a.address.country_code, Some("KZ"));
         assert_eq!(
             a.source,
             Source {
@@ -1383,6 +1425,22 @@ mod tests {
         assert_eq!(snap(Some(265.0), 45.0), Some((500, 270)));
         // No road runs north-east within 20 degrees.
         assert_eq!(snap(Some(45.0), 20.0), None);
+    }
+
+    #[test]
+    fn display_lists_each_part_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = world(dir.path());
+        let a = Address {
+            street: Some("X"),
+            locality: Some("Астана"),
+            district: Some("Алматы ауданы"),
+            state: Some("Астана"),
+            country: Some("KZ"),
+            ..Default::default()
+        };
+        let ans = idx.finish(MatchKind::Address, Some(0.0), a, Source::default());
+        assert_eq!(ans.display.matches("Астана").count(), 1, "{}", ans.display);
     }
 
     #[test]

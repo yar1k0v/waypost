@@ -188,7 +188,9 @@ pub struct Way {
     pub _pad: [u8; 3],
     /// `maxspeed` in km/h, 0 when unknown.
     pub maxspeed: u16,
-    pub _pad2: [u8; 6],
+    /// One-way: 0 = both directions, 1 = forward only, 2 = backward only.
+    pub oneway: u8,
+    pub _pad2: [u8; 5],
     pub osm_id: u64,
 }
 

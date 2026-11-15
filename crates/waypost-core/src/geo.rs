@@ -14,7 +14,7 @@ pub const SCALE: f64 = 1e7;
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
 const UNITS_PER_TURN: i64 = 360 * 10_000_000;
-const UNITS_PER_HALF_TURN: i64 = 180 * 10_000_000;
+pub const UNITS_PER_HALF_TURN: i64 = 180 * 10_000_000;
 
 /// A WGS84 point in 1e-7 degree units.
 #[repr(C)]
@@ -84,6 +84,15 @@ impl LocalFrame {
 
     pub fn origin(&self) -> Point {
         self.origin
+    }
+
+    /// Longitude half-width in fixed-point units for a distance `radius_m` at
+    /// the origin latitude, capped at 180°.
+    pub fn lon_half_span(&self, radius_m: f64) -> i64 {
+        if self.kx <= 0.0 {
+            return UNITS_PER_HALF_TURN;
+        }
+        ((radius_m / self.kx) as i64).min(UNITS_PER_HALF_TURN)
     }
 
     /// Metres east and north of the origin.
@@ -245,6 +254,16 @@ mod tests {
         let a = p(65.0, 179.9999);
         let b = p(65.0, -179.9999);
         assert!(dist(a, b) < 20.0);
+    }
+
+    #[test]
+    fn lon_half_span_is_capped_at_half_a_turn() {
+        let f = LocalFrame::new(p(89.99, 76.95));
+        assert_eq!(f.lon_half_span(15_000.0), UNITS_PER_HALF_TURN);
+        let f = LocalFrame::new(p(43.25, 76.95));
+        assert!(f.lon_half_span(1_000.0) < 200_000);
+        let f = LocalFrame::new(p(90.0, 76.95));
+        assert_eq!(f.lon_half_span(1.0), UNITS_PER_HALF_TURN);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use waypost_core::lookup::{self, Address, Index};
 
 use crate::{
-    AppState, St, bad, house_match, index, lang, point, query, radius, street_rule, timed,
+    AppState, OpKind, St, bad, house_match, index, lang, point, query, radius, street_rule, timed,
 };
 
 #[derive(Deserialize)]
@@ -79,7 +79,7 @@ fn details<'a>(a: &'a Address<'_>) -> Details<'a> {
         county: a.district,
         postcode: a.postcode,
         country: a.country,
-        country_code: a.country_code.as_deref(),
+        country_code: a.country_code,
     }
 }
 
@@ -159,15 +159,20 @@ fn parse(
     q: Result<Query<Params>, QueryRejection>,
 ) -> Result<(&Index, lookup::Query), Response> {
     let p = query(st, q)?;
-    let idx = index(st)?;
     let bad = |e: String| bad(st, e);
+    // Everything that needs no index is checked before the ready check.
+    let pt = point(p.lat, p.lon).map_err(bad)?;
+    let radius_m = radius(p.distance).map_err(bad)?;
+    let rule = street_rule(p.street.as_deref()).map_err(bad)?;
+    let house = house_match(p.house.as_deref()).map_err(bad)?;
+    let idx = index(st)?;
     let q = lookup::Query {
-        pt: point(p.lat, p.lon).map_err(bad)?,
-        radius_m: radius(p.distance).map_err(bad)?,
+        pt,
+        radius_m,
         lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
         admin_only: false,
-        street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
-        house_match: house_match(p.house.as_deref()).map_err(bad)?,
+        street_rule: rule,
+        house_match: house,
     };
     Ok((idx, q))
 }
@@ -178,7 +183,7 @@ pub async fn reverse(State(st): St, q: Result<Query<Params>, QueryRejection>) ->
         Ok(v) => v,
         Err(r) => return r,
     };
-    let ans = timed(&st.metrics, || idx.lookup(&q));
+    let ans = timed(&st.metrics, OpKind::Reverse, || idx.lookup(&q));
     let address = details(&ans.address);
     Json(Reverse {
         display_name: display_name(&address),
@@ -193,7 +198,7 @@ pub async fn snap(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Re
         Ok(v) => v,
         Err(r) => return r,
     };
-    match timed(&st.metrics, || {
+    match timed(&st.metrics, OpKind::Snap, || {
         idx.snap(q.pt, q.radius_m, q.lang, true, None)
     }) {
         Some(s) => Json(Snap {

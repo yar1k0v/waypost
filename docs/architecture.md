@@ -97,7 +97,7 @@ Coordinates are `i32` in units of 1e-7 degrees. Distances are metres in a local 
 | `*_grid`, `*_ids` | Sorted cell tables pointing at record ids |
 
 - Record layouts live in `crates/waypost-core/src/model.rs` and are the file format. A layout change needs a new `FORMAT_VERSION`.
-- Format 2 (current) stores the OSM id and type of every address, interpolation, place and area. The server refuses a format 1 index: rebuild it.
-- `tools/wpi.py` reads formats 1 and 2. The accuracy gate reads the base branch's index with the pull request's tools.
+- Format 3 (current) added the one-way field to ways. Format 2 added the OSM id and type of every address, interpolation, place and area. The server refuses an older format: rebuild the index.
+- `tools/wpi.py` reads formats 1, 2 and 3. The accuracy gate reads the base branch's index with the pull request's tools.
 - The server takes every build setting (cell sizes, languages) from the metadata. It validates all offsets at load, so a damaged file fails at start, never during a request.
 - The builder writes `<file>.tmp` and renames it. A crash never leaves a partial index under the final name.

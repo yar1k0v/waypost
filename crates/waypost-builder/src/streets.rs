@@ -12,9 +12,10 @@ use waypost_core::model::{
     Addr, GridBuilder, GridSpec, Interp, NONE, OsmType, PIECE_MAX_SEGMENTS, Piece, Place,
     PlaceKind, RoadClass, StrRef, Way, sec,
 };
+use waypost_core::pip::segment_touches_box;
 
 use crate::Tables;
-use crate::tags::{Tags, leading_number, maxspeed_kmh, name_of};
+use crate::tags::{Tags, leading_number, maxspeed_kmh, name_of, oneway};
 
 pub struct Streets {
     grid: GridSpec,
@@ -199,7 +200,8 @@ impl Streets {
             class: class as u8,
             _pad: [0; 3],
             maxspeed: maxspeed_kmh(tags.get("maxspeed")),
-            _pad2: [0; 6],
+            oneway: oneway(tags.get("oneway")),
+            _pad2: [0; 5],
             osm_id: id as u64,
         });
         let base = self.nodes.len() as u64;
@@ -273,22 +275,40 @@ impl Streets {
         });
     }
 
-    pub fn write(&self, w: &mut IndexWriter) -> Result<()> {
-        let bbox_cells = |grid: &GridSpec, pts: &[Point]| {
-            let (mut sw, mut ne) = (pts[0], pts[0]);
-            for p in pts {
-                sw.lat = sw.lat.min(p.lat);
-                sw.lon = sw.lon.min(p.lon);
-                ne.lat = ne.lat.max(p.lat);
-                ne.lon = ne.lon.max(p.lon);
+    /// Grid cells touched by any segment of the polyline `pts`. A segment that
+    /// spans several cells is tested against each one, so a diagonal road no
+    /// longer claims the far corners of its bounding box.
+    fn segment_cells(&self, grid: &GridSpec, pts: &[Point]) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let esw = Point {
+                lat: a.lat.min(b.lat),
+                lon: a.lon.min(b.lon),
+            };
+            let ene = Point {
+                lat: a.lat.max(b.lat),
+                lon: a.lon.max(b.lon),
+            };
+            let single =
+                grid.row(esw.lat) == grid.row(ene.lat) && grid.col(esw.lon) == grid.col(ene.lon);
+            for (r, c) in grid.cells_in_box(esw, ene) {
+                let (csw, cne) = grid.bounds(r, c);
+                if single || segment_touches_box(a, b, csw, cne) {
+                    out.push((r, c));
+                }
             }
-            grid.cells_in_box(sw, ne).collect::<Vec<_>>()
-        };
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 
+    pub fn write(&self, w: &mut IndexWriter) -> Result<()> {
         let mut g = GridBuilder::default();
         for (i, p) in self.pieces.iter().enumerate() {
             let pts = &self.nodes[p.node_off as usize..(p.node_off + p.n as u64) as usize];
-            for (r, c) in bbox_cells(&self.grid, pts) {
+            for (r, c) in self.segment_cells(&self.grid, pts) {
                 g.insert(GridSpec::key(r, c), i as u32);
             }
         }
@@ -307,7 +327,7 @@ impl Streets {
         let mut g = GridBuilder::default();
         for (i, it) in self.interps.iter().enumerate() {
             let pts = &self.nodes[it.node_off as usize..(it.node_off + it.n as u64) as usize];
-            for (r, c) in bbox_cells(&self.grid, pts) {
+            for (r, c) in self.segment_cells(&self.grid, pts) {
                 g.insert(GridSpec::key(r, c), i as u32);
             }
         }

@@ -10,7 +10,7 @@ HTTP/JSON on port 8080. Examples come from a Switzerland index (OSM data of 2026
 |---|---|---|---|
 | `lat`, `lon` | yes | | WGS84 degrees, lat in [-90, 90], lon in [-180, 180] |
 | `radius` | no | 100 | Search radius for houses and streets, metres, max 1000 |
-| `lang` | no | | Language code from `/v1/info`; falls back to `name` |
+| `lang` | no | | Language code from `/v1/info`, else `name`. A comma-separated list is tried in order and the first code the index knows wins |
 | `street` | no | `hybrid` | `hybrid` or `road`, see [architecture](architecture.md#lookup) |
 | `house` | no | `exact` | `exact` or `nearest`. A house is on the road when its `addr:street` equals the road name in a stored language. `nearest` also ignores letter case and spaces (`Улица Абая` is on `улица Абая`) and adds `house_distance_m` |
 | `admin_only` | no | false | Return admin areas only |
@@ -45,7 +45,8 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 
 - At most 10,000 points; body at most 2 MB.
 - `results` keeps input order. Each item echoes `id` when given.
-- A point with bad coordinates gets `"error"` in its slot; the others still answer.
+- A point may carry its own `radius` (metres, max 1000), which overrides the batch `radius`.
+- A point with bad coordinates or a bad per-point `radius` gets `"error"` in its slot; the others still answer.
 
 ## GET /v1/snap
 
@@ -53,7 +54,7 @@ curl 'http://127.0.0.1:8088/v1/reverse?lat=46.2044&lon=6.1432&lang=fr'
 |---|---|---|---|
 | `lat`, `lon` | yes | | WGS84 degrees |
 | `radius` | no | 100 | Metres, max 1000 |
-| `lang` | no | | Road name language |
+| `lang` | no | | Road name language; same comma-separated fallback as `/v1/reverse` |
 | `roads` | no | `vehicle` | `vehicle` skips pedestrian ways; `all` keeps them |
 | `bearing` | no | | Vehicle heading, degrees clockwise from north, [0, 360). Only road segments running that way count |
 | `bearing_tol` | no | 45 | Largest accepted difference to a segment's direction, degrees, (0, 180] |
@@ -74,12 +75,12 @@ With `bearing=0` the same point snaps to Theaterplatz, 4.2 m away, `bearing_deg`
 |---|---|
 | `bearing_deg` | Road direction at the snapped point. With `bearing`: the direction of travel. Without: the way's own direction |
 
-- A road matches in both directions: one-way roads are not in the index.
+- A road matches in both directions unless it is one-way. With `bearing`, a one-way road only matches its legal direction, so a heading against the flow is skipped. Without `bearing`, one-way roads do not restrict snapping.
 - 404 `{"error":"no road within radius"}` when no road is that close, or none runs within `bearing_tol` of `bearing`.
 
 ## POST /v1/snap/batch
 
-Same body as the reverse batch, with `roads` and `bearing_tol` instead of `street` and `admin_only`. Each point may carry its own `bearing`. A point with no road, or with a bad `bearing`, gets `"error"`.
+Same body as the reverse batch, with `roads` and `bearing_tol` instead of `street` and `admin_only`. Each point may carry its own `bearing` and `radius`. A point with no road, a bad `bearing` or a bad `radius` gets `"error"`.
 
 ## Legacy-compatible routes
 
@@ -100,7 +101,7 @@ For clients written against the older geocoder contract. They answer in that con
 | `GET /v1/info` | Index metadata: builder version, build time, sources, data date, settings |
 | `GET /healthz` | 200 `ok` while the process runs |
 | `GET /readyz` | 200 after the index is loaded and warmed, else 503 |
-| `GET /metrics` | Prometheus text: request counters, `waypost_lookup_seconds` histogram, `waypost_ready` |
+| `GET /metrics` | Prometheus text: request counters, `waypost_reverse_seconds` and `waypost_snap_seconds` histograms, `waypost_ready` |
 
 ## Errors
 

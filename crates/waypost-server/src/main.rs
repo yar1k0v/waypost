@@ -47,23 +47,42 @@ pub struct Metrics {
     snap_batch: AtomicU64,
     batch_points: AtomicU64,
     bad_requests: AtomicU64,
-    /// Lookup latency histogram, bucket upper bounds in microseconds.
-    buckets: [AtomicU64; BUCKETS_US.len()],
-    lookup_us_sum: AtomicU64,
-    lookups: AtomicU64,
+    /// Reverse lookup latency histogram, bucket upper bounds in microseconds.
+    reverse_buckets: [AtomicU64; BUCKETS_US.len()],
+    reverse_us_sum: AtomicU64,
+    reverse_count: AtomicU64,
+    /// Snap lookup latency histogram, bucket upper bounds in microseconds.
+    snap_buckets: [AtomicU64; BUCKETS_US.len()],
+    snap_us_sum: AtomicU64,
+    snap_count: AtomicU64,
 }
 
 const BUCKETS_US: [u64; 8] = [5, 10, 25, 50, 100, 250, 1000, u64::MAX];
 
+/// Which handler a latency sample belongs to.
+#[derive(Clone, Copy)]
+enum OpKind {
+    Reverse,
+    Snap,
+}
+
 impl Metrics {
-    fn observe(&self, us: u64) {
+    fn observe(&self, kind: OpKind, us: u64) {
         let i = BUCKETS_US
             .iter()
             .position(|&b| us <= b)
             .unwrap_or(BUCKETS_US.len() - 1);
-        self.buckets[i].fetch_add(1, Ordering::Relaxed);
-        self.lookup_us_sum.fetch_add(us, Ordering::Relaxed);
-        self.lookups.fetch_add(1, Ordering::Relaxed);
+        let (buckets, sum, count) = match kind {
+            OpKind::Reverse => (
+                &self.reverse_buckets,
+                &self.reverse_us_sum,
+                &self.reverse_count,
+            ),
+            OpKind::Snap => (&self.snap_buckets, &self.snap_us_sum, &self.snap_count),
+        };
+        buckets[i].fetch_add(1, Ordering::Relaxed);
+        sum.fetch_add(us, Ordering::Relaxed);
+        count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -105,6 +124,7 @@ fn index(st: &AppState) -> Result<&Index, Response> {
 
 pub const BAD_COORDS: &str = "lat must be in [-90, 90] and lon in [-180, 180]";
 const BAD_BEARING: &str = "bearing must be in [0, 360)";
+const BAD_RADIUS: &str = "radius must be in (0, 1000] metres";
 const NO_ROAD: &str = "no road within radius";
 
 fn point(lat: Option<f64>, lon: Option<f64>) -> Result<Point, String> {
@@ -118,19 +138,27 @@ fn radius(r: Option<f64>) -> Result<f64, String> {
     match r {
         None => Ok(lookup::DEFAULT_RADIUS_M),
         Some(r) if r.is_finite() && r > 0.0 && r <= MAX_RADIUS_M => Ok(r),
-        Some(_) => Err("radius must be in (0, 1000] metres".into()),
+        Some(_) => Err(BAD_RADIUS.into()),
     }
 }
 
+/// Language index for the first code of a `,`-separated list that the index
+/// knows, so `lang=de,fr` works when only one of them was built in.
 fn lang(idx: &Index, code: Option<&str>) -> Result<Option<u32>, String> {
     match code {
         None | Some("") => Ok(None),
-        Some(c) => idx.lang_index(c).map(Some).ok_or_else(|| {
-            format!(
-                "lang {c} is not in this index; available: {:?}",
-                idx.meta().settings.langs
-            )
-        }),
+        Some(c) => c
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .find_map(|p| idx.lang_index(p))
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "lang {c} is not in this index; available: {:?}",
+                    idx.meta().settings.langs
+                )
+            }),
     }
 }
 
@@ -186,10 +214,10 @@ fn batch_size(n: usize) -> Result<(), String> {
 }
 
 /// Runs one lookup or snap and records its latency.
-fn timed<T>(m: &Metrics, f: impl FnOnce() -> T) -> T {
+fn timed<T>(m: &Metrics, kind: OpKind, f: impl FnOnce() -> T) -> T {
     let t = Instant::now();
     let r = f();
-    m.observe(t.elapsed().as_micros() as u64);
+    m.observe(kind, t.elapsed().as_micros() as u64);
     r
 }
 
@@ -225,6 +253,9 @@ pub struct BatchPoint {
     /// Snap batches only: the vehicle heading at this point.
     #[serde(default)]
     bearing: Option<f64>,
+    /// Search radius for this point, metres. Overrides the batch radius.
+    #[serde(default)]
+    radius: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -250,11 +281,13 @@ pub struct SnapBatchRequest {
 /// One kind of per-point work in a batch.
 trait BatchOp: Send + Sync + 'static {
     type Out<'a>: Serialize + Send;
+    fn kind(&self) -> OpKind;
     fn run<'a>(
         &self,
         idx: &'a Index,
         pt: Point,
         bearing: Option<f64>,
+        radius: Option<f64>,
     ) -> Result<Self::Out<'a>, &'static str>;
 }
 
@@ -263,13 +296,24 @@ struct ReverseOp(lookup::Query);
 
 impl BatchOp for ReverseOp {
     type Out<'a> = Answer<'a>;
+
+    fn kind(&self) -> OpKind {
+        OpKind::Reverse
+    }
+
     fn run<'a>(
         &self,
         idx: &'a Index,
         pt: Point,
         _: Option<f64>,
+        radius: Option<f64>,
     ) -> Result<Answer<'a>, &'static str> {
-        Ok(idx.lookup(&lookup::Query { pt, ..self.0 }))
+        let q = lookup::Query {
+            pt,
+            radius_m: radius.unwrap_or(self.0.radius_m),
+            ..self.0
+        };
+        Ok(idx.lookup(&q))
     }
 }
 
@@ -282,15 +326,27 @@ struct SnapOp {
 
 impl BatchOp for SnapOp {
     type Out<'a> = Snapped<'a>;
+
+    fn kind(&self) -> OpKind {
+        OpKind::Snap
+    }
+
     fn run<'a>(
         &self,
         idx: &'a Index,
         pt: Point,
         bearing: Option<f64>,
+        radius: Option<f64>,
     ) -> Result<Snapped<'a>, &'static str> {
         let h = heading(bearing, self.bearing_tol)?;
-        idx.snap(pt, self.radius_m, self.lang, self.vehicle, h)
-            .ok_or(NO_ROAD)
+        idx.snap(
+            pt,
+            radius.unwrap_or(self.radius_m),
+            self.lang,
+            self.vehicle,
+            h,
+        )
+        .ok_or(NO_ROAD)
     }
 }
 
@@ -319,9 +375,18 @@ async fn run_batch<O: BatchOp>(st: Arc<AppState>, points: Vec<BatchPoint>, op: O
         let Some(idx) = st.index.get() else {
             return not_ready();
         };
-        let one = |p: &BatchPoint| match Point::from_deg(p.lat, p.lon) {
-            Some(pt) => timed(&st.metrics, || op.run(idx, pt, p.bearing)),
-            None => Err(BAD_COORDS),
+        let one = |p: &BatchPoint| {
+            let Some(pt) = Point::from_deg(p.lat, p.lon) else {
+                return Err(BAD_COORDS);
+            };
+            if p.radius
+                .is_some_and(|r| !(r.is_finite() && r > 0.0 && r <= MAX_RADIUS_M))
+            {
+                return Err(BAD_RADIUS);
+            }
+            Ok(timed(&st.metrics, op.kind(), || {
+                op.run(idx, pt, p.bearing, p.radius)
+            }))
         };
         let outs: Vec<_> = if points.len() >= PARALLEL_FROM {
             points.par_iter().map(one).collect()
@@ -354,17 +419,22 @@ async fn reverse(State(st): St, q: Result<Query<ReverseParams>, QueryRejection>)
     st.metrics.reverse.fetch_add(1, Ordering::Relaxed);
     let run = || -> Result<Response, Response> {
         let p = query(&st, q)?;
-        let idx = index(&st)?;
         let bad = |e: String| bad(&st, e);
+        // Everything that needs no index is checked before the ready check.
+        let pt = point(p.lat, p.lon).map_err(bad)?;
+        let radius_m = radius(p.radius).map_err(bad)?;
+        let rule = street_rule(p.street.as_deref()).map_err(bad)?;
+        let house = house_match(p.house.as_deref()).map_err(bad)?;
+        let idx = index(&st)?;
         let q = lookup::Query {
-            pt: point(p.lat, p.lon).map_err(bad)?,
-            radius_m: radius(p.radius).map_err(bad)?,
+            pt,
+            radius_m,
             lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
             admin_only: p.admin_only,
-            street_rule: street_rule(p.street.as_deref()).map_err(bad)?,
-            house_match: house_match(p.house.as_deref()).map_err(bad)?,
+            street_rule: rule,
+            house_match: house,
         };
-        Ok(Json(timed(&st.metrics, || idx.lookup(&q))).into_response())
+        Ok(Json(timed(&st.metrics, OpKind::Reverse, || idx.lookup(&q))).into_response())
     };
     run().unwrap_or_else(|e| e)
 }
@@ -373,16 +443,20 @@ async fn batch(State(st): St, b: Result<Json<BatchRequest>, JsonRejection>) -> R
     st.metrics.batch.fetch_add(1, Ordering::Relaxed);
     let parse = || -> Result<(Vec<BatchPoint>, ReverseOp), Response> {
         let req = body(&st, b)?;
-        let idx = index(&st)?;
         let bad = |e: String| bad(&st, e);
+        // Everything that needs no index is checked before the ready check.
         batch_size(req.points.len()).map_err(bad)?;
+        let radius_m = radius(req.radius).map_err(bad)?;
+        let rule = street_rule(req.street.as_deref()).map_err(bad)?;
+        let house = house_match(req.house.as_deref()).map_err(bad)?;
+        let idx = index(&st)?;
         let q = lookup::Query {
             pt: Point { lat: 0, lon: 0 },
-            radius_m: radius(req.radius).map_err(bad)?,
+            radius_m,
             lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
             admin_only: req.admin_only,
-            street_rule: street_rule(req.street.as_deref()).map_err(bad)?,
-            house_match: house_match(req.house.as_deref()).map_err(bad)?,
+            street_rule: rule,
+            house_match: house,
         };
         Ok((req.points, ReverseOp(q)))
     };
@@ -397,20 +471,27 @@ async fn snap(State(st): St, q: Result<Query<SnapParams>, QueryRejection>) -> Re
     let run = || -> Result<Response, Response> {
         let p = query(&st, q)?;
         let bad = |e: String| bad(&st, e);
+        // Everything that needs no index is checked before the ready check.
         let pt = point(p.lat, p.lon).map_err(bad)?;
-        let bearing_tol = bearing_tol(p.bearing_tol).map_err(bad)?;
-        heading(p.bearing, bearing_tol).map_err(|e| bad(e.into()))?;
+        let tol = bearing_tol(p.bearing_tol).map_err(bad)?;
+        heading(p.bearing, tol).map_err(|e| bad(e.into()))?;
+        let radius_m = radius(p.radius).map_err(bad)?;
+        let vehicle = vehicle_only(p.roads.as_deref()).map_err(bad)?;
         let idx = index(&st)?;
         let op = SnapOp {
-            radius_m: radius(p.radius).map_err(bad)?,
+            radius_m,
             lang: lang(idx, p.lang.as_deref()).map_err(bad)?,
-            vehicle: vehicle_only(p.roads.as_deref()).map_err(bad)?,
-            bearing_tol,
+            vehicle,
+            bearing_tol: tol,
         };
-        Ok(match timed(&st.metrics, || op.run(idx, pt, p.bearing)) {
-            Ok(s) => Json(s).into_response(),
-            Err(e) => error(StatusCode::NOT_FOUND, e),
-        })
+        Ok(
+            match timed(&st.metrics, OpKind::Snap, || {
+                op.run(idx, pt, p.bearing, None)
+            }) {
+                Ok(s) => Json(s).into_response(),
+                Err(e) => error(StatusCode::NOT_FOUND, e),
+            },
+        )
     };
     run().unwrap_or_else(|e| e)
 }
@@ -419,14 +500,18 @@ async fn snap_batch(State(st): St, b: Result<Json<SnapBatchRequest>, JsonRejecti
     st.metrics.snap_batch.fetch_add(1, Ordering::Relaxed);
     let parse = || -> Result<(Vec<BatchPoint>, SnapOp), Response> {
         let req = body(&st, b)?;
-        let idx = index(&st)?;
         let bad = |e: String| bad(&st, e);
+        // Everything that needs no index is checked before the ready check.
         batch_size(req.points.len()).map_err(bad)?;
+        let radius_m = radius(req.radius).map_err(bad)?;
+        let vehicle = vehicle_only(req.roads.as_deref()).map_err(bad)?;
+        let tol = bearing_tol(req.bearing_tol).map_err(bad)?;
+        let idx = index(&st)?;
         let op = SnapOp {
-            radius_m: radius(req.radius).map_err(bad)?,
+            radius_m,
             lang: lang(idx, req.lang.as_deref()).map_err(bad)?,
-            vehicle: vehicle_only(req.roads.as_deref()).map_err(bad)?,
-            bearing_tol: bearing_tol(req.bearing_tol).map_err(bad)?,
+            vehicle,
+            bearing_tol: tol,
         };
         Ok((req.points, op))
     };
@@ -452,6 +537,35 @@ async fn info(State(st): St) -> Response {
         Some(idx) => Json(idx.meta().clone()).into_response(),
         None => not_ready(),
     }
+}
+
+/// Writes one Prometheus histogram in seconds, from microseconds.
+fn write_histogram(
+    s: &mut String,
+    name: &str,
+    help: &str,
+    buckets: &[AtomicU64],
+    sum_us: &AtomicU64,
+    count: &AtomicU64,
+) {
+    use std::fmt::Write;
+    let _ = writeln!(s, "# HELP {name} {help}\n# TYPE {name} histogram");
+    let mut cum = 0;
+    for (i, b) in BUCKETS_US.iter().enumerate() {
+        cum += buckets[i].load(Ordering::Relaxed);
+        let le = if *b == u64::MAX {
+            "+Inf".to_string()
+        } else {
+            format!("{}", *b as f64 / 1e6)
+        };
+        let _ = writeln!(s, "{name}_bucket{{le=\"{le}\"}} {cum}");
+    }
+    let _ = writeln!(
+        s,
+        "{name}_sum {}",
+        sum_us.load(Ordering::Relaxed) as f64 / 1e6
+    );
+    let _ = writeln!(s, "{name}_count {}", count.load(Ordering::Relaxed));
 }
 
 async fn metrics(State(st): St) -> Response {
@@ -497,29 +611,21 @@ async fn metrics(State(st): St) -> Response {
         "Requests rejected with 400.",
         m.bad_requests.load(Ordering::Relaxed),
     );
-    let _ = writeln!(
-        s,
-        "# HELP waypost_lookup_seconds Time of one lookup.\n# TYPE waypost_lookup_seconds histogram"
+    write_histogram(
+        &mut s,
+        "waypost_reverse_seconds",
+        "Reverse lookup latency.",
+        &m.reverse_buckets,
+        &m.reverse_us_sum,
+        &m.reverse_count,
     );
-    let mut cum = 0;
-    for (i, b) in BUCKETS_US.iter().enumerate() {
-        cum += m.buckets[i].load(Ordering::Relaxed);
-        let le = if *b == u64::MAX {
-            "+Inf".to_string()
-        } else {
-            format!("{}", *b as f64 / 1e6)
-        };
-        let _ = writeln!(s, "waypost_lookup_seconds_bucket{{le=\"{le}\"}} {cum}");
-    }
-    let _ = writeln!(
-        s,
-        "waypost_lookup_seconds_sum {}",
-        m.lookup_us_sum.load(Ordering::Relaxed) as f64 / 1e6
-    );
-    let _ = writeln!(
-        s,
-        "waypost_lookup_seconds_count {}",
-        m.lookups.load(Ordering::Relaxed)
+    write_histogram(
+        &mut s,
+        "waypost_snap_seconds",
+        "Snap lookup latency.",
+        &m.snap_buckets,
+        &m.snap_us_sum,
+        &m.snap_count,
     );
     let _ = writeln!(
         s,

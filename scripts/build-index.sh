@@ -14,8 +14,8 @@
 # Exit code: 0 on success or skip, non-zero on any failure. On failure
 # INDEX_OUT is left as it was.
 #
-# The index is written to a temporary name first and renamed when complete,
-# so a running server never sees a half-written file.
+# waypost-builder writes INDEX_OUT.tmp and renames it to INDEX_OUT when the
+# index is complete, so a running server never sees a half-written file.
 set -eu
 : "${PBF_URLS:?set PBF_URLS}"
 langs=${WAYPOST_LANGS:-en}
@@ -43,8 +43,7 @@ for url in $PBF_URLS; do
 done
 
 # shellcheck disable=SC2086 # prefixes is a word list on purpose
-waypost-builder --out "$out.tmp" --langs "$langs" $prefixes
-mv "$out.tmp" "$out"
+waypost-builder --out "$out" --langs "$langs" $prefixes
 printf '%s\n' "$settings" > "$out.settings"
 rm -rf "$work/prep"
 echo "wrote $out"
