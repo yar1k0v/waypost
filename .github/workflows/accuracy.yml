@@ -12,10 +12,10 @@ jobs:
   gate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: head
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.base_ref || 'main' }}
           path: base
@@ -28,7 +28,7 @@ jobs:
         run: echo "key=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
       - name: Cache prepared data
         id: data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data/prep
           key: ch-prep-${{ steps.week.outputs.key }}
@@ -58,7 +58,7 @@ jobs:
           python3 head/tools/compare.py --golden data/points.jsonl \
             --waypost http://127.0.0.1:8088 --against http://127.0.0.1:8089 \
             --max-drop 0.5 --report report.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: accuracy-report
