@@ -2,7 +2,7 @@
 # Two images from one build:
 #   docker build --target server  -t waypost-server .
 #   docker build --target builder -t waypost-builder .
-FROM rust:1.98.1-slim-trixie AS build
+FROM rust:1.100.0-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/waypost-server target/release/waypost-builder /out/
 
 # Server: one binary, runs as non-root, reads the index from /index.
-FROM debian:trixie-20261020-slim AS server
+FROM debian:trixie-20261104-slim AS server
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin waypost
 COPY --from=build /out/waypost-server /usr/local/bin/waypost-server
 USER 10001
@@ -24,7 +24,7 @@ EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/waypost-server"]
 
 # Builder: osmium-tool and the index builder. Writes /index/waypost.wpi.
-FROM debian:trixie-20261020-slim AS builder
+FROM debian:trixie-20261104-slim AS builder
 RUN apt-get update \
  && apt-get install -y --no-install-recommends osmium-tool curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
