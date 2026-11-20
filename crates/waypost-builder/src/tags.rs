@@ -61,12 +61,19 @@ pub fn maxspeed_kmh(v: Option<&str>) -> u16 {
             .map_or(0, |x| (x * 1.852).round() as u16);
     }
     let first = v.split([';', '|']).next().unwrap_or(v).trim();
-    if let Some((_, zone)) = first.split_once(':') {
-        return match zone {
-            "urban" => 50,
-            "rural" => 100,
-            "motorway" => 130,
-            "living_street" => 10,
+    if let Some((country, zone)) = first.split_once(':') {
+        // Countries whose legal defaults differ from the common 50/100/130
+        // (OSM wiki "Default speed limits", passenger cars).
+        return match (country, zone) {
+            ("RU", "urban") | ("KZ", "urban") => 60,
+            ("RU", "rural") => 90,
+            ("KZ", "rural") => 110,
+            ("RU", "motorway") => 110,
+            ("KZ", "motorway") => 140,
+            (_, "urban") => 50,
+            (_, "rural") => 100,
+            (_, "motorway") => 130,
+            (_, "living_street") => 10,
             _ => 0,
         };
     }
@@ -78,12 +85,20 @@ pub fn maxspeed_kmh(v: Option<&str>) -> u16 {
 }
 
 /// Maps the OSM `oneway` tag: 0 = both directions, 1 = forward only,
-/// 2 = backward only.
-pub fn oneway(v: Option<&str>) -> u8 {
-    match v {
+/// 2 = backward only. Without a `oneway` tag, roundabouts
+/// (`junction=roundabout|circular`) and `highway=motorway` are one-way,
+/// as OSM implies.
+pub fn oneway(tags: &Tags) -> u8 {
+    match tags.get("oneway") {
         Some("yes" | "true" | "1") => 1,
         Some("-1" | "reverse") => 2,
-        _ => 0,
+        Some(_) => 0,
+        None if matches!(tags.get("junction"), Some("roundabout" | "circular"))
+            || tags.get("highway") == Some("motorway") =>
+        {
+            1
+        }
+        None => 0,
     }
 }
 
@@ -108,18 +123,30 @@ mod tests {
         assert_eq!(maxspeed_kmh(Some("30 knots")), 56);
         assert_eq!(maxspeed_kmh(Some("50;70")), 50);
         assert_eq!(maxspeed_kmh(Some("DE:urban")), 50);
+        assert_eq!(maxspeed_kmh(Some("RU:urban")), 60);
+        assert_eq!(maxspeed_kmh(Some("RU:rural")), 90);
+        assert_eq!(maxspeed_kmh(Some("KZ:rural")), 110);
+        assert_eq!(maxspeed_kmh(Some("KZ:motorway")), 140);
         assert_eq!(maxspeed_kmh(None), 0);
     }
 
     #[test]
     fn oneway_values() {
-        assert_eq!(oneway(Some("yes")), 1);
-        assert_eq!(oneway(Some("true")), 1);
-        assert_eq!(oneway(Some("1")), 1);
-        assert_eq!(oneway(Some("-1")), 2);
-        assert_eq!(oneway(Some("reverse")), 2);
-        assert_eq!(oneway(Some("no")), 0);
-        assert_eq!(oneway(None), 0);
+        let ow = |tags: &[(&'static str, &'static str)]| oneway(&Tags(tags.to_vec()));
+        assert_eq!(ow(&[("oneway", "yes")]), 1);
+        assert_eq!(ow(&[("oneway", "true")]), 1);
+        assert_eq!(ow(&[("oneway", "1")]), 1);
+        assert_eq!(ow(&[("oneway", "-1")]), 2);
+        assert_eq!(ow(&[("oneway", "reverse")]), 2);
+        assert_eq!(ow(&[("oneway", "no")]), 0);
+        assert_eq!(ow(&[]), 0);
+        // Implied one-way, and an explicit tag overriding it.
+        assert_eq!(ow(&[("junction", "roundabout")]), 1);
+        assert_eq!(ow(&[("junction", "circular")]), 1);
+        assert_eq!(ow(&[("highway", "motorway")]), 1);
+        assert_eq!(ow(&[("highway", "motorway_link")]), 0);
+        assert_eq!(ow(&[("highway", "motorway"), ("oneway", "no")]), 0);
+        assert_eq!(ow(&[("junction", "roundabout"), ("oneway", "-1")]), 2);
     }
 
     #[test]

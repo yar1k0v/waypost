@@ -200,7 +200,7 @@ impl Streets {
             class: class as u8,
             _pad: [0; 3],
             maxspeed: maxspeed_kmh(tags.get("maxspeed")),
-            oneway: oneway(tags.get("oneway")),
+            oneway: oneway(tags),
             _pad2: [0; 5],
             osm_id: id as u64,
         });
