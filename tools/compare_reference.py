@@ -8,6 +8,7 @@ Usage: python tools/compare_reference.py data/reference-reverse.jsonl http://127
 """
 import argparse
 import json
+import sys
 import urllib.request
 
 FIELDS = {
@@ -42,6 +43,10 @@ def main():
     req = urllib.request.Request(args.waypost.rstrip("/") + "/v1/reverse/batch", data=body,
                                  headers={"content-type": "application/json"})
     wp = json.load(urllib.request.urlopen(req, timeout=120))["results"]
+    bad = [w for w in wp if "match" not in w and "error" not in w]
+    if bad:
+        sys.exit(f"{len(bad)} of {len(wp)} batch items have neither 'match' nor 'error', "
+                 f"first: {json.dumps(bad[0], ensure_ascii=False)[:300]}")
     n = len(tr)
     print(f"{n} points")
     print(f"{'field':<13}{'waypost%':>9}{'ref%':>9}{'agree%':>8}{'only_wp':>8}{'only_tr':>8}{'differ':>7}")

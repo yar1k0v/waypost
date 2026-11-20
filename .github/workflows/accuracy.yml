@@ -3,9 +3,14 @@ name: accuracy
 # index, generates 10,000 test points from that index, queries both servers,
 # and fails when any field changes on more than 0.5% of points.
 # No OSM data is committed: points come from the index on every run.
-# For an intended change, raise --max-drop in the pull request.
+# Runs on pull requests and on pushes to main (base: the commit before the push).
+# For an intended change, raise --max-drop in the same commit.
 on:
   pull_request:
+    paths: ["crates/**", "tools/**", "scripts/**", "Cargo.toml", "Cargo.lock", ".github/workflows/accuracy.yml"]
+  # Direct pushes to main get the same gate, against the commit before the push.
+  push:
+    branches: [main]
     paths: ["crates/**", "tools/**", "scripts/**", "Cargo.toml", "Cargo.lock", ".github/workflows/accuracy.yml"]
   workflow_dispatch:
 jobs:
@@ -17,7 +22,7 @@ jobs:
           path: head
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.base_ref || 'main' }}
+          ref: ${{ github.base_ref || github.event.before || 'main' }}
           path: base
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

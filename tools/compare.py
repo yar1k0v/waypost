@@ -48,11 +48,24 @@ def get_json(url, timeout=30):
         return json.load(r)
 
 
+def check_items(base, res):
+    """Exits 2 when a batch item is neither an answer nor an error.
+
+    waypost 0.2.0 wrapped items as {"Ok": ...}; read as answers, they looked
+    like empty addresses and no gate noticed.
+    """
+    bad = [r for r in res if "match" not in r and "error" not in r]
+    if bad:
+        sys.exit(f"{base}: {len(bad)} of {len(res)} batch items have neither 'match' nor 'error', "
+                 f"first: {json.dumps(bad[0], ensure_ascii=False)[:300]}")
+
+
 def run_waypost(base, points, chunk=10_000):
     out, t0 = [], time.perf_counter()
     for i in range(0, len(points), chunk):
         part = [{"id": p["id"], "lat": p["lat"], "lon": p["lon"]} for p in points[i:i + chunk]]
         res = post_json(base.rstrip("/") + "/v1/reverse/batch", {"points": part})["results"]
+        check_items(base, res)
         out.extend(r.get("address", {}) for r in res)
     return out, len(points) / (time.perf_counter() - t0)
 
@@ -149,11 +162,10 @@ def main():
             print(f"FAIL: fields over {args.max_drop}% vs {name}: {bad}", file=sys.stderr)
             code = 1
     if args.baseline and args.write_baseline:
-        if args.write_baseline:
-            with open(args.baseline, "w", encoding="utf-8", newline="\n") as f:
-                for x in wp:
-                    f.write(json.dumps(x, ensure_ascii=False, sort_keys=True) + "\n")
-            print(f"baseline written: {args.baseline}")
+        with open(args.baseline, "w", encoding="utf-8", newline="\n") as f:
+            for x in wp:
+                f.write(json.dumps(x, ensure_ascii=False, sort_keys=True) + "\n")
+        print(f"baseline written: {args.baseline}")
     if args.report:
         with open(args.report, "w", encoding="utf-8", newline="\n") as f:
             json.dump(report, f, ensure_ascii=False, indent=1)
