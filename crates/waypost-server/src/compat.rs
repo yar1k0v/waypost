@@ -154,17 +154,26 @@ fn display_name(d: &Details<'_>) -> Option<String> {
 }
 
 /// Parses the shared parameters. `Err` is a ready 400 or 503 response.
+/// `street` and `house` are checked only for `/reverse` (`for_reverse`);
+/// `/snap` ignores them.
 fn parse(
     st: &AppState,
     q: Result<Query<Params>, QueryRejection>,
+    for_reverse: bool,
 ) -> Result<(&Index, lookup::Query), Response> {
     let p = query(st, q)?;
     let bad = |e: String| bad(st, e);
     // Everything that needs no index is checked before the ready check.
     let pt = point(p.lat, p.lon).map_err(bad)?;
     let radius_m = radius(p.distance).map_err(bad)?;
-    let rule = street_rule(p.street.as_deref()).map_err(bad)?;
-    let house = house_match(p.house.as_deref()).map_err(bad)?;
+    let (rule, house) = if for_reverse {
+        (
+            street_rule(p.street.as_deref()).map_err(bad)?,
+            house_match(p.house.as_deref()).map_err(bad)?,
+        )
+    } else {
+        Default::default()
+    };
     let idx = index(st)?;
     let q = lookup::Query {
         pt,
@@ -179,7 +188,7 @@ fn parse(
 
 pub async fn reverse(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Response {
     st.metrics.reverse.fetch_add(1, Ordering::Relaxed);
-    let (idx, q) = match parse(&st, q) {
+    let (idx, q) = match parse(&st, q, true) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -194,7 +203,7 @@ pub async fn reverse(State(st): St, q: Result<Query<Params>, QueryRejection>) ->
 
 pub async fn snap(State(st): St, q: Result<Query<Params>, QueryRejection>) -> Response {
     st.metrics.snap.fetch_add(1, Ordering::Relaxed);
-    let (idx, q) = match parse(&st, q) {
+    let (idx, q) = match parse(&st, q, false) {
         Ok(v) => v,
         Err(r) => return r,
     };
