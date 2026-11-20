@@ -365,6 +365,44 @@ struct BatchResponse<T> {
     results: Vec<T>,
 }
 
+/// Checks one batch point, then runs `run` on it. The result is flat on
+/// purpose: one `Result` per point, so each item serializes as the answer
+/// body or as `{"error": ...}`, never as `{"Ok": ...}` / `{"Err": ...}`.
+fn batch_one<T>(
+    p: &BatchPoint,
+    run: impl FnOnce(Point, &BatchPoint) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let pt = Point::from_deg(p.lat, p.lon).ok_or(BAD_COORDS)?;
+    if p.radius
+        .is_some_and(|r| !(r.is_finite() && r > 0.0 && r <= MAX_RADIUS_M))
+    {
+        return Err(BAD_RADIUS);
+    }
+    run(pt, p)
+}
+
+/// Pairs each point's id with its result, in input order.
+fn batch_items<'a, T>(
+    points: &'a [BatchPoint],
+    outs: Vec<Result<T, &'static str>>,
+) -> Vec<BatchItem<'a, T>> {
+    points
+        .iter()
+        .zip(outs)
+        .map(|(p, r)| {
+            let (out, error) = match r {
+                Ok(o) => (Some(o), None),
+                Err(e) => (None, Some(e)),
+            };
+            BatchItem {
+                id: p.id.as_ref(),
+                out,
+                error,
+            }
+        })
+        .collect()
+}
+
 /// Runs a batch on the blocking pool, so a 10k batch never stalls the async
 /// workers that serve single lookups. Large batches run in parallel.
 async fn run_batch<O: BatchOp>(st: Arc<AppState>, points: Vec<BatchPoint>, op: O) -> Response {
@@ -375,40 +413,21 @@ async fn run_batch<O: BatchOp>(st: Arc<AppState>, points: Vec<BatchPoint>, op: O
         let Some(idx) = st.index.get() else {
             return not_ready();
         };
-        let one = |p: &BatchPoint| {
-            let Some(pt) = Point::from_deg(p.lat, p.lon) else {
-                return Err(BAD_COORDS);
-            };
-            if p.radius
-                .is_some_and(|r| !(r.is_finite() && r > 0.0 && r <= MAX_RADIUS_M))
-            {
-                return Err(BAD_RADIUS);
-            }
-            Ok(timed(&st.metrics, op.kind(), || {
+        let run_one = |pt, p: &BatchPoint| {
+            timed(&st.metrics, op.kind(), || {
                 op.run(idx, pt, p.bearing, p.radius)
-            }))
+            })
         };
+        let one = |p: &BatchPoint| batch_one(p, run_one);
         let outs: Vec<_> = if points.len() >= PARALLEL_FROM {
             points.par_iter().map(one).collect()
         } else {
             points.iter().map(one).collect()
         };
-        let results = points
-            .iter()
-            .zip(outs)
-            .map(|(p, r)| {
-                let (out, error) = match r {
-                    Ok(o) => (Some(o), None),
-                    Err(e) => (None, Some(e)),
-                };
-                BatchItem {
-                    id: p.id.as_ref(),
-                    out,
-                    error,
-                }
-            })
-            .collect();
-        Json(BatchResponse { results }).into_response()
+        Json(BatchResponse {
+            results: batch_items(&points, outs),
+        })
+        .into_response()
     };
     tokio::task::spawn_blocking(run)
         .await
@@ -787,5 +806,41 @@ mod tests {
             .body(Body::from("{\"points\": 5}"))
             .unwrap();
         assert_eq!(status(empty(), req).await, StatusCode::BAD_REQUEST);
+    }
+
+    /// Pins the batch item shape: the answer body flat, or `{"error": ...}`.
+    /// A nested `Result` once leaked `{"Ok": ...}` / `{"Err": ...}` (0.2.0).
+    #[test]
+    fn batch_items_are_flat() {
+        let points: Vec<BatchPoint> = serde_json::from_value(serde_json::json!([
+            {"id": 1, "lat": 42.3, "lon": 69.5},
+            {"id": 2, "lat": 42.3, "lon": 69.5},
+            {"id": 3, "lat": 91.0, "lon": 0.0},
+            {"id": 4, "lat": 1.0, "lon": 1.0, "radius": 5000.0},
+        ]))
+        .unwrap();
+        // Stand-ins for ReverseOp / SnapOp: point 2 fails inside the op,
+        // like snap's "no road within radius".
+        let op = |_: Point, p: &BatchPoint| {
+            if p.id == Some(serde_json::json!(2)) {
+                Err(NO_ROAD)
+            } else {
+                Ok(serde_json::json!({"match": "address", "display": "x"}))
+            }
+        };
+        let outs = points.iter().map(|p| batch_one(p, op)).collect();
+        let v = serde_json::to_value(BatchResponse {
+            results: batch_items(&points, outs),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"results": [
+                {"id": 1, "match": "address", "display": "x"},
+                {"id": 2, "error": NO_ROAD},
+                {"id": 3, "error": BAD_COORDS},
+                {"id": 4, "error": BAD_RADIUS},
+            ]})
+        );
     }
 }
